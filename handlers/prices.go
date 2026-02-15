@@ -17,7 +17,7 @@ type PriceHandler struct {
 }
 
 func (h *PriceHandler) HandlePricesPost(w http.ResponseWriter, r *http.Request) {
-	// Получаем тип архива
+	// Получаем тип архива да ес оу ес
 	archiveType := r.URL.Query().Get("type")
 	if archiveType == "" {
 		archiveType = "zip"

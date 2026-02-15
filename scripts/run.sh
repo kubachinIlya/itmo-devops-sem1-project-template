@@ -1,4 +1,4 @@
-#!/bin/bash
+ #!/bin/bash
 set -e
 
 echo "=== Запуск в Yandex Cloud (сложный уровень) ==="
@@ -36,15 +36,6 @@ chmod 644 ~/.ssh/id_rsa.pub
 eval "$(ssh-agent -s)" > /dev/null
 ssh-add ~/.ssh/id_rsa
 
-# Отключаем проверку хоста для первого подключения
-cat > ~/.ssh/config << EOF
-Host *
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null
-    LogLevel ERROR
-EOF
-chmod 600 ~/.ssh/config
-
 # Конфигурация из GitHub Secrets
 YC_SERVICE_ACCOUNT_KEY_FILE="/tmp/sa-key.json"
 echo "$YC_SA_KEY" > $YC_SERVICE_ACCOUNT_KEY_FILE
@@ -53,11 +44,31 @@ echo "$YC_SA_KEY" > $YC_SERVICE_ACCOUNT_KEY_FILE
 yc config set service-account-key $YC_SERVICE_ACCOUNT_KEY_FILE
 yc config set folder-id $YC_FOLDER_ID
 
+# Получаем ID сети по подсети
+log "Получение информации о сети..."
+NETWORK_ID=$(yc vpc subnet get $YC_SUBNET_ID --format json | jq -r '.network_id')
+log "Network ID: $NETWORK_ID"
+
+# Создаем группу безопасности для SSH и приложения
+SG_NAME="devops-sg-$(date +%s | md5sum | head -c 8)"
+log "Создание группы безопасности $SG_NAME..."
+
+# Создаем группу безопасности
+SG_ID=$(yc vpc security-group create \
+    --name $SG_NAME \
+    --network-id $NETWORK_ID \
+    --rule direction=ingress,port=22,protocol=tcp,v4-cidrs=[0.0.0.0/0] \
+    --rule direction=ingress,port=8080,protocol=tcp,v4-cidrs=[0.0.0.0/0] \
+    --rule direction=ingress,port=5432,protocol=tcp,v4-cidrs=[0.0.0.0/0] \
+    --rule direction=egress,port=any,protocol=any,v4-cidrs=[0.0.0.0/0] \
+    --format json | jq -r '.id')
+
+log "✅ Группа безопасности создана с ID: $SG_ID"
+
 # Генерируем уникальный суффикс для ресурсов
 UNIQUE_SUFFIX=$(date +%s | md5sum | head -c 8)
 VM_NAME="devops-vm-${UNIQUE_SUFFIX}"
 DISK_NAME="devops-boot-${UNIQUE_SUFFIX}"
-SUBNET_ID="$YC_SUBNET_ID"
 ZONE="ru-central1-a"
 
 log "Создание ресурсов с уникальными именами:"
@@ -79,10 +90,9 @@ if [ ! -z "$OLD_VMS" ]; then
     done
 fi
 
-# Создание виртуальной машины
+# Создание виртуальной машины с группой безопасности
 log "Создание виртуальной машины $VM_NAME..."
 
-# Создаем VM и сохраняем ID напрямую
 VM_ID=$(yc compute instance create \
     --name $VM_NAME \
     --zone $ZONE \
@@ -92,7 +102,7 @@ VM_ID=$(yc compute instance create \
     --core-fraction 100 \
     --create-boot-disk name=$DISK_NAME,size=30GB,image-family=ubuntu-2204-lts,image-folder-id=standard-images \
     --preemptible \
-    --network-interface subnet-id=$SUBNET_ID,nat-ip-version=ipv4 \
+    --network-interface subnet-id=$YC_SUBNET_ID,security-group-id=$SG_ID,nat-ip-version=ipv4 \
     --ssh-key $SSH_KEY_FILE \
     --metadata serial-port-enable=1 \
     --format json | jq -r '.id' 2>/dev/null || echo "")
@@ -101,7 +111,6 @@ if [ -z "$VM_ID" ] || [ "$VM_ID" == "null" ]; then
     log "❌ Не удалось получить ID созданной VM"
     log "Пробуем найти VM по имени..."
     
-    # Пробуем найти VM по имени
     VM_ID=$(yc compute instance list --format json | jq -r ".[] | select(.name==\"$VM_NAME\") | .id" 2>/dev/null || echo "")
     
     if [ -z "$VM_ID" ] || [ "$VM_ID" == "null" ]; then
@@ -136,27 +145,40 @@ fi
 # Сохраняем IP для следующих шагов
 echo $VM_IP > vm_ip.txt
 log "IP адрес сохранен в vm_ip.txt: $VM_IP"
-
-# Сохраняем как переменную окружения
 echo "VM_IP_ADDRESS=$VM_IP" >> $GITHUB_ENV
 
 # Очищаем временный файл с ключом
 rm -f $SSH_KEY_FILE
 
-# Ожидание полной готовности VM и SSH
-log "Ожидание готовности SSH на сервере..."
+# Проверка доступности SSH с увеличенным таймаутом
+log "Ожидание готовности SSH на сервере (с увеличенным таймаутом)..."
 for i in {1..30}; do
-    if ssh -o ConnectTimeout=5 -o BatchMode=yes ubuntu@$VM_IP "echo OK" 2>/dev/null; then
-        log "✅ SSH доступен после $i попыток"
-        break
+    log "Попытка $i/30... (прошло $((i*10)) секунд)"
+    if nc -zv $VM_IP 22 2>/dev/null; then
+        log "✅ Порт 22 открыт!"
+        if ssh -o ConnectTimeout=10 -o BatchMode=yes ubuntu@$VM_IP "echo OK" 2>/dev/null; then
+            log "✅ SSH доступен после $i попыток"
+            break
+        fi
     fi
-    log "Попытка $i/30..."
-    sleep 5
+    sleep 10
     if [ $i -eq 30 ]; then
         log "❌ SSH не доступен после 30 попыток"
+        log "Проверка доступности портов..."
+        
+        # Проверка портов
+        nc -zv $VM_IP 22 || log "Порт 22 закрыт"
+        nc -zv $VM_IP 8080 || log "Порт 8080 закрыт"
+        nc -zv $VM_IP 5432 || log "Порт 5432 закрыт"
+        
+        # Проверка группы безопасности
+        log "Проверка группы безопасности $SG_NAME:"
+        yc vpc security-group get $SG_NAME --format json | jq '.rules'
+        
         exit 1
     fi
 done
+ 
 
 # Копирование проекта на сервер
 log "Копирование файлов проекта на сервер..."

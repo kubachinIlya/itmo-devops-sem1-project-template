@@ -1,4 +1,4 @@
-#!/bin/bash
+ #!/bin/bash
 set -e
 
 echo "=== Запуск в Yandex Cloud (сложный уровень) ==="
@@ -59,6 +59,14 @@ echo "Создание ресурсов с уникальными именами
 echo "  VM: $VM_NAME"
 echo "  Disk: $DISK_NAME"
 
+# Создаем временный файл с публичным ключом для передачи в metadata
+SSH_KEY_FILE="/tmp/ssh_key_${UNIQUE_SUFFIX}.pub"
+echo "$YC_SSH_PUBLIC_KEY" | sed 's/\r$//' > $SSH_KEY_FILE
+chmod 644 $SSH_KEY_FILE
+
+echo "Содержимое SSH ключа:"
+cat $SSH_KEY_FILE
+
 # Удаляем старые VM если есть (опционально)
 echo "Проверка и удаление старых VM..."
 OLD_VMS=$(yc compute instance list --format json | jq -r '.[] | select(.name | startswith("devops-vm-")) | .name')
@@ -70,11 +78,8 @@ done
 # Создание виртуальной машины
 echo "Создание виртуальной машины $VM_NAME..."
 
-# Читаем публичный ключ для передачи в metadata
-SSH_PUB_KEY=$(cat ~/.ssh/id_rsa.pub)
-
-# Создаем VM с уникальным именем диска
-VM_ID=$(yc compute instance create \
+# Создаем VM с использованием файла ключа
+VM_CREATE_OUTPUT=$(yc compute instance create \
     --name $VM_NAME \
     --zone $ZONE \
     --platform standard-v3 \
@@ -84,15 +89,26 @@ VM_ID=$(yc compute instance create \
     --create-boot-disk name=$DISK_NAME,size=30GB,image-family=ubuntu-2204-lts,image-folder-id=standard-images \
     --preemptible \
     --network-interface subnet-id=$SUBNET_ID,nat-ip-version=ipv4 \
-    --ssh-key "$SSH_PUB_KEY" \
+    --ssh-key $SSH_KEY_FILE \
     --metadata serial-port-enable=1 \
-    --format json | jq -r '.id')
+    --format json 2>&1) || {
+        echo "❌ Ошибка создания VM:"
+        echo "$VM_CREATE_OUTPUT"
+        exit 1
+    }
+
+# Извлекаем ID VM из вывода
+VM_ID=$(echo "$VM_CREATE_OUTPUT" | jq -r '.id')
 
 # Проверяем, что VM создана
 if [ -z "$VM_ID" ] || [ "$VM_ID" == "null" ]; then
-    echo "❌ Ошибка создания VM"
+    echo "❌ Не удалось получить ID созданной VM"
+    echo "Вывод создания VM:"
+    echo "$VM_CREATE_OUTPUT"
     exit 1
 fi
+
+echo "✅ VM создана с ID: $VM_ID"
 
 # Получение IP адреса
 echo "Ожидание назначения IP адреса..."
@@ -118,6 +134,9 @@ echo "IP адрес сохранен в vm_ip.txt: $VM_IP"
 # Сохраняем как переменную окружения
 echo "VM_IP_ADDRESS=$VM_IP" >> $GITHUB_ENV
 
+# Очищаем временный файл с ключом
+rm -f $SSH_KEY_FILE
+
 # Ожидание полной готовности VM и SSH
 echo "Ожидание готовности SSH на сервере..."
 for i in {1..30}; do
@@ -141,6 +160,7 @@ scp -v -r \
     -i ~/.ssh/id_rsa \
     $(pwd) \
     ubuntu@$VM_IP:/home/ubuntu/app/
+ 
 
 # Настройка сервера
 echo "Настройка сервера..."

@@ -1,7 +1,14 @@
 #!/bin/bash
 set -e
+set -o pipefail
 
-echo "Building Docker image"
-docker build -t project-sem1:latest .
+REPO_DIR=$(realpath $(dirname $(dirname "$0")))
+FULL_IMAGE_NAME="${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${TAG}"
 
-echo "Docker image built successfully"
+echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+
+cd $REPO_DIR
+
+docker build -t "$FULL_IMAGE_NAME" .
+docker push "$FULL_IMAGE_NAME"
+echo "FULL_IMAGE_NAME=$FULL_IMAGE_NAME" >>$GITHUB_ENV

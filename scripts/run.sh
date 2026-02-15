@@ -213,7 +213,7 @@ ssh -o StrictHostKeyChecking=no -i /tmp/yc-key ubuntu@$VM_IP << 'EOF'
   curl -f http://localhost:8080/api/v0/prices || echo "API not ready yet"
 EOF
 
-# Очистка временных файлов bite
+# Очистка временных файлов  bite
 rm -f /tmp/yc-key /tmp/yc-key.pub
 
 echo "=== Deployment Complete ==="

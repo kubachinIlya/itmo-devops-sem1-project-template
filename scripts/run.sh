@@ -3,72 +3,20 @@ set -e
 
 echo "=== Deploying to Yandex Cloud (Complex Level) ==="
 
-# Установка yc CLI, если его нет
+# Установка yc CLI
 if ! command -v yc &> /dev/null; then
     echo "Installing yc CLI..."
-    
-    ARCH=$(uname -m)
-    if [ "$ARCH" = "x86_64" ]; then
-        curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
-    elif [ "$ARCH" = "aarch64" ]; then
-        curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install_arm64.sh | bash
-    else
-        echo "Unsupported architecture: $ARCH"
-        exit 1
-    fi
-    
+    curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
     export PATH="$HOME/yandex-cloud/bin:$PATH"
-    echo "yc CLI installed and added to PATH"
 fi
 
-# Проверяем, что yc доступен
-if ! command -v yc &> /dev/null; then
-    echo "yc CLI not found"
-    exit 1
-fi
+# Настройка через OAuth токен
+yc config set token "$YC_OAUTH_TOKEN"
+yc config set folder-id "$YC_FOLDER_ID"
+yc config set compute-default-zone "ru-central1-a"
 
-echo "yc CLI version: $(yc --version | head -1)"
-
-# Используем секреты из окружения
-FOLDER_ID="$YC_FOLDER_ID"
-SUBNET_ID="$YC_SUBNET_ID"
-VM_NAME="project-sem1-vm"
-VM_ZONE="ru-central1-a"
-
-# Создаем временный файл для SSH ключа
-echo "$YC_SSH_PRIVATE_KEY" > /tmp/yc-key
-chmod 600 /tmp/yc-key
-
-# Создаем временный файл для публичного ключа
-echo "$YC_SSH_PUBLIC_KEY" > /tmp/yc-key.pub
-chmod 644 /tmp/yc-key.pub
-
-# Аутентификация через сервисный аккаунт
-# Создаем временный файл с ключом сервисного аккаунта
-cat > /tmp/sa-key.json << 'EOF'
-{
-  "id": "ajegv6p9s8h3d4b2f1k5",
-  "service_account_id": "ajegv6p9s8h3d4b2f1k5",
-  "created_at": "2024-01-01T00:00:00Z",
-  "key_algorithm": "RSA_2048",
-  "public_key": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
-  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-}
-EOF
-
-# Настраиваем аутентификацию через сервисный аккаунт
-yc config set service-account-key /tmp/sa-key.json
-yc config set folder-id "$FOLDER_ID"
-yc config set compute-default-zone "$VM_ZONE"
-
-# Проверяем аутентификацию
-echo "Checking authentication..."
-if ! yc compute instance list --format json &>/dev/null; then
-    echo "Authentication failed. Please check your service account key."
-    exit 1
-fi
-
-echo "Authentication successful"
+# Проверка
+yc compute instance list
 
 # Создаем виртуальную машину
 echo "Creating VM in Yandex Cloud..."

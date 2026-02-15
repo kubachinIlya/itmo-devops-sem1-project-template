@@ -7,8 +7,9 @@ on:
     branches: [ main, master ]
 
 jobs:
-  test:
-    name: Run Tests
+  # Job 1: Локальное тестирование
+  local-tests:
+    name: Local Tests
     runs-on: ubuntu-latest
 
     services:
@@ -37,53 +38,32 @@ jobs:
     - name: Make scripts executable
       run: |
         chmod +x scripts/prepare.sh
-        chmod +x scripts/run.sh
+        chmod +x scripts/run-local.sh
         chmod +x scripts/tests.sh
 
     - name: Prepare environment
       run: ./scripts/prepare.sh
 
-    - name: Run application in Yandex Cloud
-      run: ./scripts/run.sh
-      env:
-        YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
-        YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
-        YC_SUBNET_ID: ${{ secrets.YC_SUBNET_ID }}
-        YC_SSH_PRIVATE_KEY: ${{ secrets.YC_SSH_PRIVATE_KEY }}
-        YC_SSH_PUBLIC_KEY: ${{ secrets.YC_SSH_PUBLIC_KEY }}
+    - name: Run application locally
+      run: |
+        go run main.go &
+        echo "APP_PID=$!" >> $GITHUB_ENV
+        sleep 10
 
     - name: Test Level 1
       id: test-level-1
       continue-on-error: true
       run: ./scripts/tests.sh 1
-      env:
-        POSTGRES_HOST: localhost
-        POSTGRES_PORT: 5432
-        POSTGRES_DB: project-sem-1
-        POSTGRES_USER: validator
-        POSTGRES_PASSWORD: val1dat0r
 
     - name: Test Level 2
       id: test-level-2
       continue-on-error: true
       run: ./scripts/tests.sh 2
-      env:
-        POSTGRES_HOST: localhost
-        POSTGRES_PORT: 5432
-        POSTGRES_DB: project-sem-1
-        POSTGRES_USER: validator
-        POSTGRES_PASSWORD: val1dat0r
 
     - name: Test Level 3
       id: test-level-3
       continue-on-error: true
       run: ./scripts/tests.sh 3
-      env:
-        POSTGRES_HOST: localhost
-        POSTGRES_PORT: 5432
-        POSTGRES_DB: project-sem-1
-        POSTGRES_USER: validator
-        POSTGRES_PASSWORD: val1dat0r
 
     - name: Check test results
       if: always()
@@ -98,10 +78,52 @@ jobs:
           exit 1
         fi
 
+  # Job 2: Деплой в Yandex Cloud
+  deploy-yandex:
+    name: Deploy to Yandex Cloud
+    runs-on: ubuntu-latest
+    needs: local-tests
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Make scripts executable
+      run: chmod +x scripts/run.sh
+
+    - name: Deploy to Yandex Cloud
+      id: deploy
+      run: ./scripts/run.sh
+      env:
+        YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
+        YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
+        YC_SUBNET_ID: ${{ secrets.YC_SUBNET_ID }}
+        YC_SSH_PRIVATE_KEY: ${{ secrets.YC_SSH_PRIVATE_KEY }}
+        YC_SSH_PUBLIC_KEY: ${{ secrets.YC_SSH_PUBLIC_KEY }}
+
+    - name: Save VM IP
+      run: |
+        if [ -f vm_ip.txt ]; then
+          IP=$(cat vm_ip.txt)
+          echo "VM_IP_ADDRESS=$IP" >> $GITHUB_ENV
+          echo "✅ VM IP: $IP"
+        fi
+
+    # Опционально: протестировать на удаленной VM
+    - name: Test on remote VM
+      run: |
+        if [ -f vm_ip.txt ]; then
+          export VM_IP_ADDRESS=$(cat vm_ip.txt)
+          ./scripts/tests.sh 3
+        fi
+      env:
+        VM_IP_ADDRESS: ${{ env.VM_IP_ADDRESS }}
+
+  # Job 3: Сборка Docker образа
   docker:
     name: Build Docker Image
     runs-on: ubuntu-latest
-    needs: test
+    needs: local-tests
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     steps:
     - uses: actions/checkout@v3

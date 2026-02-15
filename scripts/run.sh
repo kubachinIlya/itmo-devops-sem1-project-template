@@ -7,11 +7,12 @@ echo "=== Запуск в Yandex Cloud (сложный уровень) ==="
 if ! command -v yc &> /dev/null; then
     echo "Установка Yandex Cloud CLI..."
     curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
-    exec -l $SHELL
-    source ~/.bashrc
+    export PATH="$PATH:/home/runner/yandex-cloud/bin"
+    source /home/runner/.bashrc
 fi
 
 # Сохраняем SSH ключи
+mkdir -p ~/.ssh
 echo "$YC_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
 chmod 600 ~/.ssh/id_rsa
 echo "$YC_SSH_PUBLIC_KEY" > ~/.ssh/id_rsa.pub
@@ -56,6 +57,10 @@ echo "✅ Сервер создан. IP адрес: $VM_IP"
 
 # Сохраняем IP для следующих шагов
 echo $VM_IP > vm_ip.txt
+echo "IP адрес сохранен в vm_ip.txt: $VM_IP"
+
+# Также сохраняем как переменную окружения для текущего шага
+echo "VM_IP_ADDRESS=$VM_IP" >> $GITHUB_ENV
 
 # Ожидание полной готовности VM
 echo "Ожидание готовности VM (60 секунд)..."
@@ -115,7 +120,7 @@ ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
     
     # Ожидание запуска PostgreSQL
     echo "Ожидание запуска PostgreSQL..."
-    sleep 10
+    sleep 15
     
     # Проверка PostgreSQL
     sudo docker exec postgres-db pg_isready -U validator || true
@@ -148,20 +153,30 @@ ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
     
     # Проверка запуска
     echo "Проверка запуска приложения..."
-    sleep 5
+    sleep 10
+    
+    # Проверка что приложение отвечает
+    echo "Проверка API..."
+    curl -s http://localhost:8080/api/v0/prices || echo "API еще не готов"
+    
     sudo docker logs devops-app --tail 20
     sudo docker ps | grep devops-app
 EOF
 
-# Проверка работоспособности
-echo "Проверка работоспособности API..."
-sleep 10
-HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$VM_IP:8080/api/v0/prices || echo "000")
-if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "404" ]; then
-    echo "✅ API отвечает (код $HTTP_STATUS)"
-else
-    echo "⚠️ API пока не отвечает (код $HTTP_STATUS), проверьте позже"
-fi
+# Проверка работоспособности удаленного API
+echo "Проверка работоспособности API на удаленном сервере..."
+for i in {1..30}; do
+    echo "Попытка $i/30..."
+    HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$VM_IP:8080/api/v0/prices || echo "000")
+    if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "404" ]; then
+        echo "✅ API на $VM_IP отвечает (код $HTTP_STATUS)"
+        break
+    fi
+    if [ $i -eq 30 ]; then
+        echo "⚠️ API на $VM_IP не отвечает после 30 попыток"
+    fi
+    sleep 5
+done
 
 # Вывод информации
 echo ""
@@ -172,18 +187,10 @@ echo "IP адрес сервера: $VM_IP"
 echo "Приложение: http://$VM_IP:8080"
 echo "PostgreSQL: $VM_IP:5432"
 echo ""
-echo "Проверка API:"
-echo "  curl http://$VM_IP:8080/api/v0/prices"
-echo ""
-echo "Для подключения по SSH:"
-echo "  ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP"
-echo ""
-echo "Для просмотра логов:"
-echo "  ssh ubuntu@$VM_IP 'sudo docker logs devops-app'"
+echo "IP сохранен в:"
+echo "  - vm_ip.txt"
+echo "  - GITHUB_ENV как VM_IP_ADDRESS"
 echo "========================================="
 
- 
-echo $VM_IP > vm_ip.txt
-echo "IP адрес сохранен в vm_ip.txt для тестов"
 # Очистка
 rm -f $YC_SERVICE_ACCOUNT_KEY_FILE

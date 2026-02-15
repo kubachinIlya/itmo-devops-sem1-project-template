@@ -1,147 +1,186 @@
 #!/bin/bash
 set -e
-set -o pipefail
 
-YC_FOLDER_ID=$YC_FOLDER_ID
-YC_ZONE=${YC_ZONE:-ru-central1-a}
-YC_TOKEN=$YC_TOKEN
-YC_IMAGE_ID="fd8bnguet48kpk4ovt1u"
-INSTANCE_NAME="prices-app-$(date +%s)"
-SSH_USER="ubuntu"
-PUBLIC_KEY=$PUBLIC_KEY
-PRIVATE_KEY=$PRIVATE_KEY
-SSH_KEY_PATH="$HOME/.ssh/id_ed25519"
+echo "=== Запуск в Yandex Cloud (сложный уровень) ==="
 
-mkdir -p "$HOME/.ssh"
-echo "$PUBLIC_KEY" >"$SSH_KEY_PATH.pub"
-echo "$PRIVATE_KEY" >"$SSH_KEY_PATH"
-cat >$HOME/.ssh/config <<EOF
-Host *
-    IdentityFile ~/.ssh/id_ed25519
-    IdentitiesOnly yes
-    StrictHostKeyChecking no
-EOF
+# Проверка наличия yc CLI
+if ! command -v yc &> /dev/null; then
+    echo "Установка Yandex Cloud CLI..."
+    curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+    exec -l $SHELL
+    source ~/.bashrc
+fi
 
-chmod 600 ~/.ssh/id_ed25519
-chmod 644 ~/.ssh/id_ed25519.pub
+# Сохраняем SSH ключи
+echo "$YC_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+chmod 600 ~/.ssh/id_rsa
+echo "$YC_SSH_PUBLIC_KEY" > ~/.ssh/id_rsa.pub
+chmod 644 ~/.ssh/id_rsa.pub
 
-cat >cloud-init.yaml <<EOF
-#cloud-config
-users:
-  - name: $SSH_USER
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    groups: sudo
-    shell: /bin/bash
-    ssh_authorized_keys:
-      - $(echo "$PUBLIC_KEY")
-ssh_pwauth: no
-disable_root: true
-EOF
+# Конфигурация из GitHub Secrets
+YC_SERVICE_ACCOUNT_KEY_FILE="/tmp/sa-key.json"
+echo "$YC_SA_KEY" > $YC_SERVICE_ACCOUNT_KEY_FILE
 
-yc config set token $YC_TOKEN
+# Инициализация yc
+yc config set service-account-key $YC_SERVICE_ACCOUNT_KEY_FILE
+yc config set folder-id $YC_FOLDER_ID
 
-echo "Creating VM..."
-YC_INSTANCE_ID=$(yc compute instance create \
-    --name "$INSTANCE_NAME" \
-    --folder-id "$YC_FOLDER_ID" \
-    --zone "$YC_ZONE" \
-    --network-interface subnet-name=default-$YC_ZONE,nat-ip-version=ipv4 \
-    --create-boot-disk size=20,image-id="$YC_IMAGE_ID" \
-    --memory=2 \
-    --cores=2 \
-    --metadata-from-file user-data=cloud-init.yaml \
+# Параметры VM
+VM_NAME="devops-vm-$(date +%s)"
+SUBNET_ID="$YC_SUBNET_ID"
+ZONE="ru-central1-a"
+
+# Создание виртуальной машины
+echo "Создание виртуальной машины $VM_NAME..."
+
+# Создаем VM с Ubuntu 22.04
+VM_ID=$(yc compute instance create \
+    --name $VM_NAME \
+    --zone $ZONE \
+    --platform standard-v3 \
+    --cores 2 \
+    --memory 4GB \
+    --core-fraction 100 \
+    --create-boot-disk name=devops-boot,size=30GB,image-family=ubuntu-2204-lts,image-folder-id=standard-images \
+    --preemptible \
+    --network-interface subnet-id=$SUBNET_ID,nat-ip-version=ipv4 \
+    --ssh-key ~/.ssh/id_rsa.pub \
+    --metadata docker-install=true \
     --format json | jq -r '.id')
 
-echo "Instance ID: $YC_INSTANCE_ID"
+# Получение IP адреса
+echo "Ожидание назначения IP адреса..."
+sleep 10
+VM_IP=$(yc compute instance get $VM_NAME --format json | jq -r '.network_interfaces[0].primary_v4_address.one_to_one_nat.address')
+echo "✅ Сервер создан. IP адрес: $VM_IP"
 
-PUBLIC_IP=$(yc compute instance get --id "$YC_INSTANCE_ID" --format json | jq -r '.network_interfaces[0].primary_v4_address.one_to_one_nat.address')
+# Сохраняем IP для следующих шагов
+echo $VM_IP > vm_ip.txt
 
-echo "Public IP: $PUBLIC_IP"
+# Ожидание полной готовности VM
+echo "Ожидание готовности VM (60 секунд)..."
+sleep 60
 
-echo "Trying to SSH..."
-for i in {1..20}; do
-    if ssh -o ConnectTimeout=10 "$SSH_USER@$PUBLIC_IP" "echo ok" >/dev/null 2>&1; then
-        break
+# Копирование проекта на сервер
+echo "Копирование файлов проекта на сервер..."
+scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
+    -i ~/.ssh/id_rsa \
+    -r \
+    $(pwd) \
+    ubuntu@$VM_IP:/home/ubuntu/app/
+
+# Настройка сервера
+ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
+    set -e
+    
+    echo "Настройка сервера..."
+    
+    # Установка Docker если не установлен
+    if ! command -v docker &> /dev/null; then
+        echo "Установка Docker..."
+        sudo apt-get update
+        sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+        sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+        sudo apt-get update
+        sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
     fi
-    echo "waiting... $i/20"
+    
+    # Добавление пользователя в группу docker
+    sudo usermod -aG docker $USER
+    
+    # Установка PostgreSQL клиента для тестов
+    sudo apt-get install -y postgresql-client
+    
+    # Создание сети для Docker
+    sudo docker network create app-network 2>/dev/null || true
+EOF
+
+# Запуск PostgreSQL в контейнере
+echo "Запуск PostgreSQL..."
+ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
+    cd /home/ubuntu/app
+    
+    # Запуск PostgreSQL
+    sudo docker run -d \
+        --name postgres-db \
+        --network app-network \
+        -e POSTGRES_DB=project-sem-1 \
+        -e POSTGRES_USER=validator \
+        -e POSTGRES_PASSWORD=val1dat0r \
+        -p 5432:5432 \
+        -v postgres_data:/var/lib/postgresql/data \
+        --restart unless-stopped \
+        postgres:15
+    
+    # Ожидание запуска PostgreSQL
+    echo "Ожидание запуска PostgreSQL..."
     sleep 10
-done
-
-echo "Installing Docker and Compose..."
-ssh "$SSH_USER@$PUBLIC_IP" <<'EOF'
-sudo apt update -y
-sudo apt install -y ca-certificates curl
-sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
-
-sudo bash -c 'cat <<EOT > /etc/apt/sources.list.d/docker.sources
-Types: deb
-URIs: https://download.docker.com/linux/ubuntu
-Suites: '$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")'
-Components: stable
-Signed-By: /etc/apt/keyrings/docker.asc
-EOT'
-
-sudo apt update
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-sudo systemctl enable docker --now
-sudo usermod -aG docker $USER
+    
+    # Проверка PostgreSQL
+    sudo docker exec postgres-db pg_isready -U validator || true
 EOF
 
-# Создаем  docker-compose.yml   
-cat > docker-compose.yml <<EOF
-version: '3.8'
-
-services:
-  postgres:
-    image: postgres:15
-    container_name: postgres
-    environment:
-      POSTGRES_DB: project-sem-1
-      POSTGRES_USER: validator
-      POSTGRES_PASSWORD: val1dat0r
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U validator -d project-sem-1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  app:
-    image: $FULL_IMAGE_NAME
-    container_name: app
-    ports:
-      - "8080:8080"
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: project-sem-1
-      POSTGRES_USER: validator
-      POSTGRES_PASSWORD: val1dat0r
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-
-volumes:
-  postgres_data:
+# Сборка и запуск приложения
+echo "Сборка и запуск приложения..."
+ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
+    cd /home/ubuntu/app
+    
+    # Сборка Docker образа
+    echo "Сборка Docker образа приложения..."
+    sudo docker build -t devops-app:latest .
+    
+    # Запуск приложения
+    sudo docker stop devops-app 2>/dev/null || true
+    sudo docker rm devops-app 2>/dev/null || true
+    
+    sudo docker run -d \
+        --name devops-app \
+        --network app-network \
+        -p 8080:8080 \
+        -e POSTGRES_HOST=postgres-db \
+        -e POSTGRES_PORT=5432 \
+        -e POSTGRES_DB=project-sem-1 \
+        -e POSTGRES_USER=validator \
+        -e POSTGRES_PASSWORD=val1dat0r \
+        --restart unless-stopped \
+        devops-app:latest
+    
+    # Проверка запуска
+    echo "Проверка запуска приложения..."
+    sleep 5
+    sudo docker logs devops-app --tail 20
+    sudo docker ps | grep devops-app
 EOF
 
-echo "Copying deployment files..."
-scp docker-compose.yml "$SSH_USER@$PUBLIC_IP:/home/$SSH_USER/"
+# Проверка работоспособности
+echo "Проверка работоспособности API..."
+sleep 10
+HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$VM_IP:8080/api/v0/prices || echo "000")
+if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "404" ]; then
+    echo "✅ API отвечает (код $HTTP_STATUS)"
+else
+    echo "⚠️ API пока не отвечает (код $HTTP_STATUS), проверьте позже"
+fi
 
-echo "Starting Docker Compose..."
-ssh "$SSH_USER@$PUBLIC_IP" <<EOF
-cd /home/$SSH_USER
-sudo docker compose pull
-sudo docker compose up -d
-EOF
+# Вывод информации
+echo ""
+echo "========================================="
+echo "✅ Развертывание успешно завершено!"
+echo "========================================="
+echo "IP адрес сервера: $VM_IP"
+echo "Приложение: http://$VM_IP:8080"
+echo "PostgreSQL: $VM_IP:5432"
+echo ""
+echo "Проверка API:"
+echo "  curl http://$VM_IP:8080/api/v0/prices"
+echo ""
+echo "Для подключения по SSH:"
+echo "  ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP"
+echo ""
+echo "Для просмотра логов:"
+echo "  ssh ubuntu@$VM_IP 'sudo docker logs devops-app'"
+echo "========================================="
 
-echo "PUBLIC_IP=$PUBLIC_IP" >>$GITHUB_ENV
-echo "API_HOST=http://$PUBLIC_IP:8080" >>$GITHUB_ENV
-echo "DB_HOST=$PUBLIC_IP" >>$GITHUB_ENV
+# Очистка
+rm -f $YC_SERVICE_ACCOUNT_KEY_FILE

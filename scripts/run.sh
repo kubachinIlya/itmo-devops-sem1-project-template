@@ -20,17 +20,43 @@ chmod 644 /tmp/yc-key.pub
 if ! command -v yc &> /dev/null; then
     echo "Installing yc CLI..."
     curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+    
+    # Добавляем yc в PATH для текущей сессии
     export PATH="$HOME/yandex-cloud/bin:$PATH"
+    
+    # Добавляем в bashrc для будущих сессий
+    echo 'export PATH="$HOME/yandex-cloud/bin:$PATH"' >> ~/.bashrc
+    
+    echo "yc CLI installed"
 fi
 
-# Настройка через OAuth токен
+# Проверяем, что yc доступен
+if ! command -v yc &> /dev/null; then
+    echo "ERROR: yc command not found after installation"
+    exit 1
+fi
+
+# Настройка через OAuth токен (ДЕЛАЕМ ЭТО ДО ЛЮБЫХ ДРУГИХ КОМАНД)
+echo "Configuring yc with OAuth token..."
 yc config set token "$YC_OAUTH_TOKEN"
 yc config set folder-id "$FOLDER_ID"
 yc config set compute-default-zone "$VM_ZONE"
 
-# Проверка конфигурации
-echo "Checking Yandex Cloud configuration..."
-yc compute instance list
+# Проверяем, что токен работает
+echo "Testing yc configuration..."
+if ! yc config list &> /dev/null; then
+    echo "ERROR: Failed to configure yc with token"
+    exit 1
+fi
+
+# Проверяем доступ к Compute Cloud
+echo "Checking Yandex Cloud Compute access..."
+if ! yc compute instance list &> /dev/null; then
+    echo "ERROR: Cannot access Compute Cloud. Check token permissions."
+    exit 1
+fi
+
+echo "YC configuration successful!"
 
 # Создаем виртуальную машину
 echo "Creating VM in Yandex Cloud..."

@@ -3,6 +3,19 @@ set -e
 
 echo "=== Deploying to Yandex Cloud (Complex Level) ==="
 
+# Переменные из GitHub Secrets
+YC_OAUTH_TOKEN="${YC_OAUTH_TOKEN}"
+FOLDER_ID="${YC_FOLDER_ID}"
+SUBNET_ID="${YC_SUBNET_ID}"
+VM_NAME="project-sem1-vm"
+VM_ZONE="ru-central1-a"
+
+# Создаем временные файлы для SSH ключей
+echo "${YC_SSH_PRIVATE_KEY}" > /tmp/yc-key
+chmod 600 /tmp/yc-key
+echo "${YC_SSH_PUBLIC_KEY}" > /tmp/yc-key.pub
+chmod 644 /tmp/yc-key.pub
+
 # Установка yc CLI
 if ! command -v yc &> /dev/null; then
     echo "Installing yc CLI..."
@@ -12,10 +25,11 @@ fi
 
 # Настройка через OAuth токен
 yc config set token "$YC_OAUTH_TOKEN"
-yc config set folder-id "$YC_FOLDER_ID"
-yc config set compute-default-zone "ru-central1-a"
+yc config set folder-id "$FOLDER_ID"
+yc config set compute-default-zone "$VM_ZONE"
 
-# Проверка
+# Проверка конфигурации
+echo "Checking Yandex Cloud configuration..."
 yc compute instance list
 
 # Создаем виртуальную машину
@@ -161,7 +175,7 @@ ssh -o StrictHostKeyChecking=no -i /tmp/yc-key ubuntu@$VM_IP << 'EOF'
   curl -f http://localhost:8080/api/v0/prices || echo "API not ready yet"
 EOF
 
-# Очистка временных файлов  bite
+# Очистка временных файлов
 rm -f /tmp/yc-key /tmp/yc-key.pub
 
 echo "=== Deployment Complete ==="

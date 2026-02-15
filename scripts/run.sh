@@ -3,67 +3,32 @@ set -e
 
 echo "=== Deploying to Yandex Cloud (Complex Level) ==="
 
-# Переменные из GitHub Secrets
-YC_OAUTH_TOKEN="${YC_OAUTH_TOKEN}"
-FOLDER_ID="${YC_FOLDER_ID}"
-SUBNET_ID="${YC_SUBNET_ID}"
-VM_NAME="project-sem1-vm"
+# Конфигурация из GitHub Secrets
+FOLDER_ID="${YC_FOLDER_ID:-b1gg9v1869p6b25d54uq}"
+SUBNET_ID="${YC_SUBNET_ID:-e9b5mhgqb5a7h1vphdp3}"
+VM_NAME="project-sem1-vm-$(date +%s)"  # Уникальное имя с timestamp
 VM_ZONE="ru-central1-a"
 
-# Создаем временные файлы для SSH ключей
-echo "${YC_SSH_PRIVATE_KEY}" > /tmp/yc-key
-chmod 600 /tmp/yc-key
-echo "${YC_SSH_PUBLIC_KEY}" > /tmp/yc-key.pub
-chmod 644 /tmp/yc-key.pub
+# Создаем временный файл для SSH ключа
+SSH_KEY_FILE=$(mktemp)
+echo "$YC_SSH_PRIVATE_KEY" > "$SSH_KEY_FILE"
+chmod 600 "$SSH_KEY_FILE"
 
-# Установка yc CLI
+# Проверка наличия yc CLI
 if ! command -v yc &> /dev/null; then
-    echo "Installing yc CLI..."
-    curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
-    
-    # Добавляем yc в PATH для текущей сессии
-    export PATH="$HOME/yandex-cloud/bin:$PATH"
-    
-    # Добавляем в bashrc для будущих сессий
-    echo 'export PATH="$HOME/yandex-cloud/bin:$PATH"' >> ~/.bashrc
-    
-    echo "yc CLI installed"
-fi
-
-# Проверяем, что yc доступен
-if ! command -v yc &> /dev/null; then
-    echo "ERROR: yc command not found after installation"
+    echo "Error: yc CLI not found. Please install it first."
     exit 1
 fi
 
-# Настройка через OAuth токен (ДЕЛАЕМ ЭТО ДО ЛЮБЫХ ДРУГИХ КОМАНД)
-echo "Configuring yc with OAuth token..."
-yc config set token "$YC_OAUTH_TOKEN"
-yc config set folder-id "$FOLDER_ID"
-yc config set compute-default-zone "$VM_ZONE"
-
-# Проверяем, что токен работает
-echo "Testing yc configuration..."
-if ! yc config list &> /dev/null; then
-    echo "ERROR: Failed to configure yc with token"
+# Проверка наличия SSH ключа
+if [ -z "$YC_SSH_PUBLIC_KEY" ]; then
+    echo "Error: SSH public key not found in environment"
     exit 1
 fi
 
-# Проверяем доступ к Compute Cloud
-echo "Checking Yandex Cloud Compute access..."
-if ! yc compute instance list &> /dev/null; then
-    echo "ERROR: Cannot access Compute Cloud. Check token permissions."
-    exit 1
-fi
-
-echo "YC configuration successful!"
+echo "Creating VM in Yandex Cloud..."
 
 # Создаем виртуальную машину
-echo "Creating VM in Yandex Cloud..."
-echo "Folder ID: $FOLDER_ID"
-echo "Subnet ID: $SUBNET_ID"
-echo "Zone: $VM_ZONE"
-
 VM_ID=$(yc compute instance create \
   --name $VM_NAME \
   --zone $VM_ZONE \
@@ -73,7 +38,7 @@ VM_ID=$(yc compute instance create \
   --memory 4GB \
   --create-boot-disk image-folder-id=standard-images,image-family=ubuntu-2204-lts,size=30GB \
   --network-interface subnet-id=$SUBNET_ID,nat-ip-version=ipv4 \
-  --metadata ssh-keys="ubuntu:$(cat /tmp/yc-key.pub)" \
+  --metadata ssh-keys="ubuntu:${YC_SSH_PUBLIC_KEY}" \
   --format json | grep -o '"id": *"[^"]*"' | head -1 | cut -d'"' -f4)
 
 if [ -z "$VM_ID" ]; then
@@ -84,7 +49,7 @@ fi
 echo "VM created with ID: $VM_ID"
 
 # Получаем IP адрес
-sleep 10
+sleep 10  # Ждем, пока VM получит IP
 VM_IP=$(yc compute instance get $VM_ID \
   --folder-id $FOLDER_ID \
   --format json | grep -o '"one_to_one_nat": *{[^}]*"address": *"[^"]*"' | grep -o '"address": *"[^"]*"' | cut -d'"' -f4)
@@ -100,18 +65,7 @@ echo "VM public IP: $VM_IP"
 echo "Waiting for VM to initialize..."
 sleep 30
 
-# Проверяем доступность SSH
-echo "Checking SSH connection..."
-for i in {1..30}; do
-    if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i /tmp/yc-key ubuntu@$VM_IP "echo OK" 2>/dev/null; then
-        echo "SSH connection successful"
-        break
-    fi
-    echo "Waiting for SSH... $i/30"
-    sleep 5
-done
-
-# Создаем docker-compose.yml
+# Создаем docker-compose.yml на лету
 cat > docker-compose.yml << 'EOF'
 version: '3.8'
 
@@ -157,7 +111,8 @@ EOF
 
 # Копируем файлы на сервер
 echo "Copying files to server..."
-scp -o StrictHostKeyChecking=no -i /tmp/yc-key \
+scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
+  -i "$SSH_KEY_FILE" \
   Dockerfile \
   go.mod \
   go.sum \
@@ -166,12 +121,18 @@ scp -o StrictHostKeyChecking=no -i /tmp/yc-key \
   ubuntu@$VM_IP:~/
 
 # Копируем директории
-scp -o StrictHostKeyChecking=no -i /tmp/yc-key \
-  -r handlers models utils db \
-  ubuntu@$VM_IP:~/
+for dir in handlers models utils db; do
+    if [ -d "$dir" ]; then
+        scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
+          -i "$SSH_KEY_FILE" \
+          -r "$dir" \
+          ubuntu@$VM_IP:~/
+    fi
+done
 
 # Подключаемся к серверу и запускаем
-ssh -o StrictHostKeyChecking=no -i /tmp/yc-key ubuntu@$VM_IP << 'EOF'
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
+  -i "$SSH_KEY_FILE" ubuntu@$VM_IP << 'EOF'
   echo "Setting up server..."
   
   # Установка Docker
@@ -199,14 +160,18 @@ ssh -o StrictHostKeyChecking=no -i /tmp/yc-key ubuntu@$VM_IP << 'EOF'
   
   echo "=== Testing API ==="
   curl -f http://localhost:8080/api/v0/prices || echo "API not ready yet"
+  
+  echo "=== Deployment logs ==="
+  sudo docker-compose logs --tail=50
 EOF
-
-# Очистка временных файлов
-rm -f /tmp/yc-key /tmp/yc-key.pub
 
 echo "=== Deployment Complete ==="
 echo "Server IP: $VM_IP"
 echo "API available at: http://$VM_IP:8080"
+echo "SSH: ssh -i ~/.ssh/yc-key ubuntu@$VM_IP"
 
 # Сохраняем IP для тестов
 echo "$VM_IP" > vm_ip.txt
+
+# Очистка
+rm -f "$SSH_KEY_FILE"

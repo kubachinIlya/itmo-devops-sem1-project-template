@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 
 	"project_sem/models"
 
@@ -11,7 +12,18 @@ import (
 )
 
 func ConnectDB() (*sql.DB, error) {
-	connStr := "postgres://validator:val1dat0r@localhost:5432/project-sem-1?sslmode=disable"
+	host := os.Getenv("POSTGRES_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+
+	port := os.Getenv("POSTGRES_PORT")
+	if port == "" {
+		port = "5432"
+	}
+
+	connStr := fmt.Sprintf("postgres://validator:val1dat0r@%s:%s/project-sem-1?sslmode=disable",
+		host, port)
 
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {

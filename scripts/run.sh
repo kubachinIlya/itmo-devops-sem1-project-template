@@ -89,7 +89,7 @@ sudo systemctl enable docker --now
 sudo usermod -aG docker $USER
 EOF
 
-# Создаем docker-compose.yml
+# Создаем  docker-compose.yml   
 cat > docker-compose.yml <<EOF
 version: '3.8'
 

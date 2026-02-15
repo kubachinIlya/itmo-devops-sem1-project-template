@@ -22,12 +22,16 @@ func ExtractCSVFromArchive(data []byte, archiveType string) ([]byte, error) {
 }
 
 func extractFromZip(data []byte) ([]byte, error) {
+	// Проверяем сигнатуру ZIP
+	if len(data) < 4 || data[0] != 0x50 || data[1] != 0x4B {
+		return nil, fmt.Errorf("not a valid zip file")
+	}
+
 	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, fmt.Errorf("error reading zip: %v", err)
 	}
 
-	// Ищем CSV файл
 	for _, file := range reader.File {
 		if strings.HasSuffix(strings.ToLower(file.Name), ".csv") {
 			rc, err := file.Open()
@@ -50,18 +54,21 @@ func extractFromZip(data []byte) ([]byte, error) {
 func extractFromTar(data []byte) ([]byte, error) {
 	var tarReader *tar.Reader
 
-	//  как gzip
-	gzipReader, err := gzip.NewReader(bytes.NewReader(data))
-	if err == nil {
-		//  gzip
+	// Проверяем, является ли файл gzip архивом
+	if len(data) > 2 && data[0] == 0x1F && data[1] == 0x8B {
+		// Это gzip архив
+		gzipReader, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("error reading gzip: %v", err)
+		}
 		defer gzipReader.Close()
 		tarReader = tar.NewReader(gzipReader)
 	} else {
-		// tar
+		// Обычный tar архив
 		tarReader = tar.NewReader(bytes.NewReader(data))
 	}
 
-	// Ищем CSV файл
+	// Ищем CSV файл в архиве
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
@@ -71,12 +78,19 @@ func extractFromTar(data []byte) ([]byte, error) {
 			return nil, fmt.Errorf("error reading tar: %v", err)
 		}
 
+		// Пропускаем директории
+		if header.Typeflag == tar.TypeDir {
+			continue
+		}
+
+		// Ищем файл с расширением .csv
 		if strings.HasSuffix(strings.ToLower(header.Name), ".csv") {
-			csvData, err := io.ReadAll(tarReader)
+			var buf bytes.Buffer
+			_, err := io.Copy(&buf, tarReader)
 			if err != nil {
 				return nil, fmt.Errorf("error reading CSV from tar: %v", err)
 			}
-			return csvData, nil
+			return buf.Bytes(), nil
 		}
 	}
 

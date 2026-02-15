@@ -42,6 +42,12 @@ jobs:
         chmod +x scripts/prepare.sh
         chmod +x scripts/run.sh
         chmod +x scripts/tests.sh
+      # docker part
+    - name: Build Docker image
+      run: |
+        echo "Building Docker image for complex level..."
+        docker build -t project-sem1:latest .
+        echo "Docker image built successfully"
 
     - name: Prepare environment
       run: ./scripts/prepare.sh

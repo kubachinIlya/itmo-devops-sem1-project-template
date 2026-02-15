@@ -3,56 +3,33 @@ set -e
 
 echo "=== Deploying to Yandex Cloud (Complex Level) ==="
 
-# Проверяем, что мы в CI/CD или локально
-if [ -n "$CI" ]; then
-    echo "Running in CI/CD environment"
-    
-    # В CI/CD используем переменные из secrets
-    FOLDER_ID="$YC_FOLDER_ID"
-    SUBNET_ID="$YC_SUBNET_ID"
-    
-    # Создаем временные файлы для SSH ключей
-    echo "$YC_SSH_PRIVATE_KEY" > /tmp/yc-key
-    echo "$YC_SSH_PUBLIC_KEY" > /tmp/yc-key.pub
-    chmod 600 /tmp/yc-key
-    chmod 644 /tmp/yc-key.pub
-    
-    SSH_KEY_PATH="/tmp/yc-key"
-    SSH_PUB_KEY_PATH="/tmp/yc-key.pub"
-else
-    echo "Running locally"
-    # Локально используем файлы из ~/.ssh/
-    FOLDER_ID="b1gg9v1869p6b25d54uq"
-    SUBNET_ID="e9b5mhgqb5a7h1vphdp3"
-    SSH_KEY_PATH="$HOME/.ssh/yc-key"
-    SSH_PUB_KEY_PATH="$HOME/.ssh/yc-key.pub"
-fi
+# Просто берем из переменных окружения (они уже есть в GitHub Actions)
+FOLDER_ID="$YC_FOLDER_ID"
+SUBNET_ID="$YC_SUBNET_ID"
+VM_NAME="project-sem1-vm"
+VM_ZONE="ru-central1-a"
 
-# Проверка наличия переменных
-if [ -z "$FOLDER_ID" ] || [ -z "$SUBNET_ID" ]; then
-    echo "Error: FOLDER_ID or SUBNET_ID not set"
-    exit 1
-fi
+# Создаем временный файл для SSH ключа
+echo "$YC_SSH_PRIVATE_KEY" > /tmp/yc-key
+chmod 600 /tmp/yc-key
 
-# Проверка наличия SSH ключей
-if [ ! -f "$SSH_KEY_PATH" ] || [ ! -f "$SSH_PUB_KEY_PATH" ]; then
-    echo "Error: SSH keys not found at $SSH_KEY_PATH"
-    exit 1
-fi
+# Создаем временный файл для публичного ключа
+echo "$YC_SSH_PUBLIC_KEY" > /tmp/yc-key.pub
+chmod 644 /tmp/yc-key.pub
 
 echo "Creating VM in Yandex Cloud..."
 
 # Создаем виртуальную машину
 VM_ID=$(yc compute instance create \
-  --name project-sem1-vm \
-  --zone ru-central1-a \
+  --name $VM_NAME \
+  --zone $VM_ZONE \
   --folder-id $FOLDER_ID \
   --platform standard-v3 \
   --cores 2 \
   --memory 4GB \
   --create-boot-disk image-folder-id=standard-images,image-family=ubuntu-2204-lts,size=30GB \
   --network-interface subnet-id=$SUBNET_ID,nat-ip-version=ipv4 \
-  --metadata ssh-keys="ubuntu:$(cat $SSH_PUB_KEY_PATH)" \
+  --metadata ssh-keys="ubuntu:$(cat /tmp/yc-key.pub)" \
   --format json | grep -o '"id": *"[^"]*"' | head -1 | cut -d'"' -f4)
 
 if [ -z "$VM_ID" ]; then
@@ -74,9 +51,6 @@ if [ -z "$VM_IP" ]; then
 fi
 
 echo "VM public IP: $VM_IP"
-
-# Сохраняем IP для тестов
-echo "$VM_IP" > vm_ip.txt
 
 # Ждем, пока VM полностью запустится
 echo "Waiting for VM to initialize..."
@@ -128,7 +102,7 @@ EOF
 
 # Копируем файлы на сервер
 echo "Copying files to server..."
-scp -o StrictHostKeyChecking=no -i "$SSH_PRIVATE_KEY_PATH" \
+scp -o StrictHostKeyChecking=no -i /tmp/yc-key \
   Dockerfile \
   go.mod \
   go.sum \
@@ -137,12 +111,12 @@ scp -o StrictHostKeyChecking=no -i "$SSH_PRIVATE_KEY_PATH" \
   ubuntu@$VM_IP:~/
 
 # Копируем директории
-scp -o StrictHostKeyChecking=no -i "$SSH_PRIVATE_KEY_PATH" \
+scp -o StrictHostKeyChecking=no -i /tmp/yc-key \
   -r handlers models utils db \
   ubuntu@$VM_IP:~/
 
 # Подключаемся к серверу и запускаем
-ssh -o StrictHostKeyChecking=no -i "$SSH_PRIVATE_KEY_PATH" ubuntu@$VM_IP << 'EOF'
+ssh -o StrictHostKeyChecking=no -i /tmp/yc-key ubuntu@$VM_IP << 'EOF'
   echo "Setting up server..."
   
   # Установка Docker
@@ -173,12 +147,11 @@ ssh -o StrictHostKeyChecking=no -i "$SSH_PRIVATE_KEY_PATH" ubuntu@$VM_IP << 'EOF
 EOF
 
 # Очистка временных файлов
-rm -f "$SSH_PRIVATE_KEY_PATH" "$SSH_PUBLIC_KEY_PATH"
+rm -f /tmp/yc-key /tmp/yc-key.pub
 
 echo "=== Deployment Complete ==="
 echo "Server IP: $VM_IP"
 echo "API available at: http://$VM_IP:8080"
-echo "SSH: ssh -i ~/.ssh/yc-key ubuntu@$VM_IP"
 
 # Сохраняем IP для тестов
 echo "$VM_IP" > vm_ip.txt

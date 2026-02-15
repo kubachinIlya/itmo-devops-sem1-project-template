@@ -18,17 +18,23 @@ if ! command -v yc &> /dev/null; then
         exit 1
     fi
     
-    # Добавляем yc в PATH для текущей сессии
-    export PATH="$PATH:$HOME/yandex-cloud/bin"
+    # Добавляем yc в PATH для текущей сессии (ВАЖНО: делаем это ДО использования yc)
+    export PATH="$HOME/yandex-cloud/bin:$PATH"
     
-    # Обновляем PATH для текущей сессии
-    source "$HOME/.bashrc" 2>/dev/null || true
+    echo "yc CLI installed and added to PATH"
 fi
 
 # Проверяем, что yc доступен
 if ! command -v yc &> /dev/null; then
-    echo "Failed to install yc CLI"
-    exit 1
+    echo "yc CLI not found in PATH. Current PATH: $PATH"
+    echo "Checking if yc exists in home directory..."
+    if [ -f "$HOME/yandex-cloud/bin/yc" ]; then
+        echo "Found yc at $HOME/yandex-cloud/bin/yc, adding to PATH"
+        export PATH="$HOME/yandex-cloud/bin:$PATH"
+    else
+        echo "Failed to install yc CLI"
+        exit 1
+    fi
 fi
 
 echo "yc CLI version: $(yc --version | head -1)"
@@ -47,19 +53,21 @@ chmod 600 /tmp/yc-key
 echo "$YC_SSH_PUBLIC_KEY" > /tmp/yc-key.pub
 chmod 644 /tmp/yc-key.pub
 
-# Настраиваем yc CLI (исправленная версия)
-yc config set folder-id $FOLDER_ID
-yc config set compute-default-zone $VM_ZONE
+# Настраиваем yc CLI
+echo "Configuring yc CLI..."
+yc config set folder-id "$FOLDER_ID"
+yc config set compute-default-zone "$VM_ZONE"
 
 # Проверяем настройки
 echo "YC config:"
 yc config list
 
 echo "Creating VM in Yandex Cloud..."
+echo "Folder ID: $FOLDER_ID"
+echo "Subnet ID: $SUBNET_ID"
+echo "Zone: $VM_ZONE"
 
 # Создаем виртуальную машину
-echo "Creating VM with folder-id: $FOLDER_ID, subnet-id: $SUBNET_ID"
-
 VM_ID=$(yc compute instance create \
   --name $VM_NAME \
   --zone $VM_ZONE \
@@ -73,8 +81,7 @@ VM_ID=$(yc compute instance create \
   --format json | grep -o '"id": *"[^"]*"' | head -1 | cut -d'"' -f4)
 
 if [ -z "$VM_ID" ]; then
-    echo "Failed to create VM"
-    echo "Trying to create VM with debug info..."
+    echo "Failed to create VM. Trying with debug output..."
     yc compute instance create \
       --name $VM_NAME \
       --zone $VM_ZONE \

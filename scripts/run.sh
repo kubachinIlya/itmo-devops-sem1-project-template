@@ -1,18 +1,23 @@
- #!/bin/bash
+#!/bin/bash
 set -e
 
 echo "=== Запуск в Yandex Cloud (сложный уровень) ==="
 
+# Функция для логирования
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
+}
+
 # Проверка наличия yc CLI
 if ! command -v yc &> /dev/null; then
-    echo "Установка Yandex Cloud CLI..."
+    log "Установка Yandex Cloud CLI..."
     curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
     export PATH="$PATH:/home/runner/yandex-cloud/bin"
     source /home/runner/.bashrc
 fi
 
 # Настройка SSH
-echo "Настройка SSH ключей..."
+log "Настройка SSH ключей..."
 mkdir -p ~/.ssh
 chmod 700 ~/.ssh
 
@@ -28,7 +33,7 @@ echo "$YC_SSH_PUBLIC_KEY" | sed 's/\r$//' > ~/.ssh/id_rsa.pub
 chmod 644 ~/.ssh/id_rsa.pub
 
 # Добавляем ключ в ssh-agent
-eval "$(ssh-agent -s)"
+eval "$(ssh-agent -s)" > /dev/null
 ssh-add ~/.ssh/id_rsa
 
 # Отключаем проверку хоста для первого подключения
@@ -49,37 +54,37 @@ yc config set service-account-key $YC_SERVICE_ACCOUNT_KEY_FILE
 yc config set folder-id $YC_FOLDER_ID
 
 # Генерируем уникальный суффикс для ресурсов
-UNIQUE_SUFFIX=$(date +%s%N | md5sum | head -c 8)
+UNIQUE_SUFFIX=$(date +%s | md5sum | head -c 8)
 VM_NAME="devops-vm-${UNIQUE_SUFFIX}"
 DISK_NAME="devops-boot-${UNIQUE_SUFFIX}"
 SUBNET_ID="$YC_SUBNET_ID"
 ZONE="ru-central1-a"
 
-echo "Создание ресурсов с уникальными именами:"
-echo "  VM: $VM_NAME"
-echo "  Disk: $DISK_NAME"
+log "Создание ресурсов с уникальными именами:"
+log "  VM: $VM_NAME"
+log "  Disk: $DISK_NAME"
 
-# Создаем временный файл с публичным ключом для передачи в metadata
+# Создаем временный файл с публичным ключом
 SSH_KEY_FILE="/tmp/ssh_key_${UNIQUE_SUFFIX}.pub"
 echo "$YC_SSH_PUBLIC_KEY" | sed 's/\r$//' > $SSH_KEY_FILE
 chmod 644 $SSH_KEY_FILE
 
-echo "Содержимое SSH ключа:"
-cat $SSH_KEY_FILE
-
-# Удаляем старые VM если есть (опционально)
-echo "Проверка и удаление старых VM..."
-OLD_VMS=$(yc compute instance list --format json | jq -r '.[] | select(.name | startswith("devops-vm-")) | .name')
-for OLD_VM in $OLD_VMS; do
-    echo "Удаляем старую VM: $OLD_VM"
-    yc compute instance delete $OLD_VM --async
-done
+# Удаляем старые VM если есть
+log "Проверка и удаление старых VM..."
+OLD_VMS=$(yc compute instance list --format json | jq -r '.[] | select(.name | startswith("devops-vm-")) | .name' 2>/dev/null || echo "")
+if [ ! -z "$OLD_VMS" ]; then
+    for OLD_VM in $OLD_VMS; do
+        log "Удаляем старую VM: $OLD_VM"
+        yc compute instance delete $OLD_VM --async > /dev/null 2>&1
+    done
+fi
 
 # Создание виртуальной машины
-echo "Создание виртуальной машины $VM_NAME..."
+log "Создание виртуальной машины $VM_NAME..."
 
-# Создаем VM с использованием файла ключа
-VM_CREATE_OUTPUT=$(yc compute instance create \
+# Создаем VM и сохраняем вывод во временный файл
+TMP_OUTPUT="/tmp/vm_create_output_${UNIQUE_SUFFIX}.json"
+yc compute instance create \
     --name $VM_NAME \
     --zone $ZONE \
     --platform standard-v3 \
@@ -91,45 +96,54 @@ VM_CREATE_OUTPUT=$(yc compute instance create \
     --network-interface subnet-id=$SUBNET_ID,nat-ip-version=ipv4 \
     --ssh-key $SSH_KEY_FILE \
     --metadata serial-port-enable=1 \
-    --format json 2>&1) || {
-        echo "❌ Ошибка создания VM:"
-        echo "$VM_CREATE_OUTPUT"
+    --format json > $TMP_OUTPUT 2>&1 || {
+        log "❌ Ошибка создания VM"
+        cat $TMP_OUTPUT
+        rm -f $TMP_OUTPUT $SSH_KEY_FILE
         exit 1
     }
 
-# Извлекаем ID VM из вывода
-VM_ID=$(echo "$VM_CREATE_OUTPUT" | jq -r '.id')
-
-# Проверяем, что VM создана
-if [ -z "$VM_ID" ] || [ "$VM_ID" == "null" ]; then
-    echo "❌ Не удалось получить ID созданной VM"
-    echo "Вывод создания VM:"
-    echo "$VM_CREATE_OUTPUT"
+# Проверяем, что вывод не пустой и содержит валидный JSON
+if [ ! -s $TMP_OUTPUT ]; then
+    log "❌ Пустой вывод при создании VM"
+    rm -f $TMP_OUTPUT $SSH_KEY_FILE
     exit 1
 fi
 
-echo "✅ VM создана с ID: $VM_ID"
+# Извлекаем ID VM из вывода
+VM_ID=$(jq -r '.id' $TMP_OUTPUT 2>/dev/null || echo "")
+
+if [ -z "$VM_ID" ] || [ "$VM_ID" == "null" ]; then
+    log "❌ Не удалось получить ID созданной VM"
+    cat $TMP_OUTPUT
+    rm -f $TMP_OUTPUT $SSH_KEY_FILE
+    exit 1
+fi
+
+log "✅ VM создана с ID: $VM_ID"
+rm -f $TMP_OUTPUT
 
 # Получение IP адреса
-echo "Ожидание назначения IP адреса..."
+log "Ожидание назначения IP адреса..."
 for i in {1..30}; do
     VM_IP=$(yc compute instance get $VM_NAME --format json 2>/dev/null | jq -r '.network_interfaces[0].primary_v4_address.one_to_one_nat.address')
     if [ ! -z "$VM_IP" ] && [ "$VM_IP" != "null" ]; then
-        echo "✅ IP адрес получен: $VM_IP"
+        log "✅ IP адрес получен: $VM_IP"
         break
     fi
-    echo "Попытка $i/30..."
+    log "Попытка $i/30..."
     sleep 2
 done
 
 if [ -z "$VM_IP" ] || [ "$VM_IP" == "null" ]; then
-    echo "❌ Не удалось получить IP адрес"
+    log "❌ Не удалось получить IP адрес"
+    rm -f $SSH_KEY_FILE
     exit 1
 fi
 
 # Сохраняем IP для следующих шагов
 echo $VM_IP > vm_ip.txt
-echo "IP адрес сохранен в vm_ip.txt: $VM_IP"
+log "IP адрес сохранен в vm_ip.txt: $VM_IP"
 
 # Сохраняем как переменную окружения
 echo "VM_IP_ADDRESS=$VM_IP" >> $GITHUB_ENV
@@ -138,55 +152,54 @@ echo "VM_IP_ADDRESS=$VM_IP" >> $GITHUB_ENV
 rm -f $SSH_KEY_FILE
 
 # Ожидание полной готовности VM и SSH
-echo "Ожидание готовности SSH на сервере..."
+log "Ожидание готовности SSH на сервере..."
 for i in {1..30}; do
     if ssh -o ConnectTimeout=5 -o BatchMode=yes ubuntu@$VM_IP "echo OK" 2>/dev/null; then
-        echo "✅ SSH доступен после $i попыток"
+        log "✅ SSH доступен после $i попыток"
         break
     fi
-    echo "Попытка $i/30..."
+    log "Попытка $i/30..."
     sleep 5
     if [ $i -eq 30 ]; then
-        echo "❌ SSH не доступен после 30 попыток"
+        log "❌ SSH не доступен после 30 попыток"
         exit 1
     fi
 done
 
 # Копирование проекта на сервер
-echo "Копирование файлов проекта на сервер..."
-scp -v -r \
+log "Копирование файлов проекта на сервер..."
+scp -r \
     -o ConnectTimeout=30 \
     -o StrictHostKeyChecking=no \
     -i ~/.ssh/id_rsa \
     $(pwd) \
     ubuntu@$VM_IP:/home/ubuntu/app/
- 
 
 # Настройка сервера
-echo "Настройка сервера..."
-ssh -v -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
+log "Настройка сервера..."
+ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
     set -e
     
     echo "Настройка сервера..."
     
     # Обновление пакетов
-    sudo apt-get update
+    sudo apt-get update > /dev/null 2>&1
     
     # Установка Docker если не установлен
     if ! command -v docker &> /dev/null; then
         echo "Установка Docker..."
-        sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-        sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-        sudo apt-get update
-        sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common > /dev/null 2>&1
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add - > /dev/null 2>&1
+        sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /dev/null 2>&1
+        sudo apt-get update > /dev/null 2>&1
+        sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin > /dev/null 2>&1
     fi
     
     # Добавление пользователя в группу docker
     sudo usermod -aG docker $USER
     
-    # Установка PostgreSQL клиента для тестов
-    sudo apt-get install -y postgresql-client
+    # Установка PostgreSQL клиента
+    sudo apt-get install -y postgresql-client > /dev/null 2>&1
     
     # Создание сети для Docker
     sudo docker network create app-network 2>/dev/null || true
@@ -195,7 +208,7 @@ ssh -v -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
 EOF
 
 # Запуск PostgreSQL в контейнере
-echo "Запуск PostgreSQL..."
+log "Запуск PostgreSQL..."
 ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
     cd /home/ubuntu/app
     
@@ -209,7 +222,7 @@ ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
         -p 5432:5432 \
         -v postgres_data:/var/lib/postgresql/data \
         --restart unless-stopped \
-        postgres:15
+        postgres:15 > /dev/null 2>&1
     
     # Ожидание запуска PostgreSQL
     echo "Ожидание запуска PostgreSQL..."
@@ -220,13 +233,13 @@ ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
 EOF
 
 # Сборка и запуск приложения
-echo "Сборка и запуск приложения..."
+log "Сборка и запуск приложения..."
 ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
     cd /home/ubuntu/app
     
     # Сборка Docker образа
     echo "Сборка Docker образа приложения..."
-    sudo docker build -t devops-app:latest .
+    sudo docker build -t devops-app:latest . > /dev/null 2>&1
     
     # Запуск приложения
     sudo docker stop devops-app 2>/dev/null || true
@@ -242,7 +255,7 @@ ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
         -e POSTGRES_USER=validator \
         -e POSTGRES_PASSWORD=val1dat0r \
         --restart unless-stopped \
-        devops-app:latest
+        devops-app:latest > /dev/null 2>&1
     
     # Проверка запуска
     echo "Проверка запуска приложения..."
@@ -257,33 +270,33 @@ ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP << 'EOF'
 EOF
 
 # Проверка работоспособности удаленного API
-echo "Проверка работоспособности API на удаленном сервере..."
+log "Проверка работоспособности API на удаленном сервере..."
 for i in {1..30}; do
-    echo "Попытка $i/30..."
+    log "Попытка $i/30..."
     HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$VM_IP:8080/api/v0/prices || echo "000")
     if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "404" ]; then
-        echo "✅ API на $VM_IP отвечает (код $HTTP_STATUS)"
+        log "✅ API на $VM_IP отвечает (код $HTTP_STATUS)"
         break
     fi
     if [ $i -eq 30 ]; then
-        echo "⚠️ API на $VM_IP не отвечает после 30 попыток"
+        log "⚠️ API на $VM_IP не отвечает после 30 попыток"
     fi
     sleep 5
 done
 
 # Вывод информации
-echo ""
-echo "========================================="
-echo "✅ Развертывание успешно завершено!"
-echo "========================================="
-echo "IP адрес сервера: $VM_IP"
-echo "Приложение: http://$VM_IP:8080"
-echo "PostgreSQL: $VM_IP:5432"
-echo ""
-echo "IP сохранен в:"
-echo "  - vm_ip.txt"
-echo "  - GITHUB_ENV как VM_IP_ADDRESS"
-echo "========================================="
+log ""
+log "========================================="
+log "✅ Развертывание успешно завершено!"
+log "========================================="
+log "IP адрес сервера: $VM_IP"
+log "Приложение: http://$VM_IP:8080"
+log "PostgreSQL: $VM_IP:5432"
+log ""
+log "IP сохранен в:"
+log "  - vm_ip.txt"
+log "  - GITHUB_ENV как VM_IP_ADDRESS"
+log "========================================="
 
 # Очистка
 rm -f $YC_SERVICE_ACCOUNT_KEY_FILE

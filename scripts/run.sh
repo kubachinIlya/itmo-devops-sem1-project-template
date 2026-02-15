@@ -182,5 +182,8 @@ echo "Для просмотра логов:"
 echo "  ssh ubuntu@$VM_IP 'sudo docker logs devops-app'"
 echo "========================================="
 
+ 
+echo $VM_IP > vm_ip.txt
+echo "IP адрес сохранен в vm_ip.txt для тестов"
 # Очистка
 rm -f $YC_SERVICE_ACCOUNT_KEY_FILE

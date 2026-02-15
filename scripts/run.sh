@@ -7,7 +7,6 @@ echo "=== Deploying to Yandex Cloud (Complex Level) ==="
 if ! command -v yc &> /dev/null; then
     echo "Installing yc CLI..."
     
-    # Определяем архитектуру
     ARCH=$(uname -m)
     if [ "$ARCH" = "x86_64" ]; then
         curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
@@ -18,23 +17,14 @@ if ! command -v yc &> /dev/null; then
         exit 1
     fi
     
-    # Добавляем yc в PATH для текущей сессии (ВАЖНО: делаем это ДО использования yc)
     export PATH="$HOME/yandex-cloud/bin:$PATH"
-    
     echo "yc CLI installed and added to PATH"
 fi
 
 # Проверяем, что yc доступен
 if ! command -v yc &> /dev/null; then
-    echo "yc CLI not found in PATH. Current PATH: $PATH"
-    echo "Checking if yc exists in home directory..."
-    if [ -f "$HOME/yandex-cloud/bin/yc" ]; then
-        echo "Found yc at $HOME/yandex-cloud/bin/yc, adding to PATH"
-        export PATH="$HOME/yandex-cloud/bin:$PATH"
-    else
-        echo "Failed to install yc CLI"
-        exit 1
-    fi
+    echo "yc CLI not found"
+    exit 1
 fi
 
 echo "yc CLI version: $(yc --version | head -1)"
@@ -53,21 +43,39 @@ chmod 600 /tmp/yc-key
 echo "$YC_SSH_PUBLIC_KEY" > /tmp/yc-key.pub
 chmod 644 /tmp/yc-key.pub
 
-# Настраиваем yc CLI
-echo "Configuring yc CLI..."
+# Аутентификация через сервисный аккаунт
+# Создаем временный файл с ключом сервисного аккаунта
+cat > /tmp/sa-key.json << 'EOF'
+{
+  "id": "ajegv6p9s8h3d4b2f1k5",
+  "service_account_id": "ajegv6p9s8h3d4b2f1k5",
+  "created_at": "2024-01-01T00:00:00Z",
+  "key_algorithm": "RSA_2048",
+  "public_key": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+}
+EOF
+
+# Настраиваем аутентификацию через сервисный аккаунт
+yc config set service-account-key /tmp/sa-key.json
 yc config set folder-id "$FOLDER_ID"
 yc config set compute-default-zone "$VM_ZONE"
 
-# Проверяем настройки
-echo "YC config:"
-yc config list
+# Проверяем аутентификацию
+echo "Checking authentication..."
+if ! yc compute instance list --format json &>/dev/null; then
+    echo "Authentication failed. Please check your service account key."
+    exit 1
+fi
 
+echo "Authentication successful"
+
+# Создаем виртуальную машину
 echo "Creating VM in Yandex Cloud..."
 echo "Folder ID: $FOLDER_ID"
 echo "Subnet ID: $SUBNET_ID"
 echo "Zone: $VM_ZONE"
 
-# Создаем виртуальную машину
 VM_ID=$(yc compute instance create \
   --name $VM_NAME \
   --zone $VM_ZONE \
@@ -81,17 +89,7 @@ VM_ID=$(yc compute instance create \
   --format json | grep -o '"id": *"[^"]*"' | head -1 | cut -d'"' -f4)
 
 if [ -z "$VM_ID" ]; then
-    echo "Failed to create VM. Trying with debug output..."
-    yc compute instance create \
-      --name $VM_NAME \
-      --zone $VM_ZONE \
-      --folder-id $FOLDER_ID \
-      --platform standard-v3 \
-      --cores 2 \
-      --memory 4GB \
-      --create-boot-disk image-folder-id=standard-images,image-family=ubuntu-2204-lts,size=30GB \
-      --network-interface subnet-id=$SUBNET_ID,nat-ip-version=ipv4 \
-      --metadata ssh-keys="ubuntu:$(cat /tmp/yc-key.pub)"
+    echo "Failed to create VM"
     exit 1
 fi
 

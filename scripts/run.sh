@@ -82,9 +82,8 @@ fi
 # Создание виртуальной машины
 log "Создание виртуальной машины $VM_NAME..."
 
-# Создаем VM и сохраняем вывод во временный файл
-TMP_OUTPUT="/tmp/vm_create_output_${UNIQUE_SUFFIX}.json"
-yc compute instance create \
+# Создаем VM и сохраняем ID напрямую
+VM_ID=$(yc compute instance create \
     --name $VM_NAME \
     --zone $ZONE \
     --platform standard-v3 \
@@ -96,37 +95,30 @@ yc compute instance create \
     --network-interface subnet-id=$SUBNET_ID,nat-ip-version=ipv4 \
     --ssh-key $SSH_KEY_FILE \
     --metadata serial-port-enable=1 \
-    --format json > $TMP_OUTPUT 2>&1 || {
-        log "❌ Ошибка создания VM"
-        cat $TMP_OUTPUT
-        rm -f $TMP_OUTPUT $SSH_KEY_FILE
-        exit 1
-    }
-
-# Проверяем, что вывод не пустой и содержит валидный JSON
-if [ ! -s $TMP_OUTPUT ]; then
-    log "❌ Пустой вывод при создании VM"
-    rm -f $TMP_OUTPUT $SSH_KEY_FILE
-    exit 1
-fi
-
-# Извлекаем ID VM из вывода
-VM_ID=$(jq -r '.id' $TMP_OUTPUT 2>/dev/null || echo "")
+    --format json | jq -r '.id' 2>/dev/null || echo "")
 
 if [ -z "$VM_ID" ] || [ "$VM_ID" == "null" ]; then
     log "❌ Не удалось получить ID созданной VM"
-    cat $TMP_OUTPUT
-    rm -f $TMP_OUTPUT $SSH_KEY_FILE
-    exit 1
+    log "Пробуем найти VM по имени..."
+    
+    # Пробуем найти VM по имени
+    VM_ID=$(yc compute instance list --format json | jq -r ".[] | select(.name==\"$VM_NAME\") | .id" 2>/dev/null || echo "")
+    
+    if [ -z "$VM_ID" ] || [ "$VM_ID" == "null" ]; then
+        log "❌ VM не найдена даже по имени"
+        rm -f $SSH_KEY_FILE
+        exit 1
+    else
+        log "✅ VM найдена по имени с ID: $VM_ID"
+    fi
+else
+    log "✅ VM создана с ID: $VM_ID"
 fi
-
-log "✅ VM создана с ID: $VM_ID"
-rm -f $TMP_OUTPUT
 
 # Получение IP адреса
 log "Ожидание назначения IP адреса..."
 for i in {1..30}; do
-    VM_IP=$(yc compute instance get $VM_NAME --format json 2>/dev/null | jq -r '.network_interfaces[0].primary_v4_address.one_to_one_nat.address')
+    VM_IP=$(yc compute instance get $VM_ID --format json 2>/dev/null | jq -r '.network_interfaces[0].primary_v4_address.one_to_one_nat.address')
     if [ ! -z "$VM_IP" ] && [ "$VM_IP" != "null" ]; then
         log "✅ IP адрес получен: $VM_IP"
         break

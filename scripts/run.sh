@@ -3,7 +3,34 @@ set -e
 
 echo "=== Deploying to Yandex Cloud (Complex Level) ==="
 
-# Просто берем из переменных окружения (они уже есть в GitHub Actions)
+# Установка yc CLI, если его нет
+if ! command -v yc &> /dev/null; then
+    echo "Installing yc CLI..."
+    
+    # Определяем архитектуру
+    ARCH=$(uname -m)
+    if [ "$ARCH" = "x86_64" ]; then
+        curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+    elif [ "$ARCH" = "aarch64" ]; then
+        curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install_arm64.sh | bash
+    else
+        echo "Unsupported architecture: $ARCH"
+        exit 1
+    fi
+    
+    # Добавляем yc в PATH для текущей сессии
+    export PATH="$PATH:$HOME/yandex-cloud/bin"
+fi
+
+# Проверяем, что yc доступен
+if ! command -v yc &> /dev/null; then
+    echo "Failed to install yc CLI"
+    exit 1
+fi
+
+echo "yc CLI version: $(yc --version)"
+
+# Используем секреты из окружения
 FOLDER_ID="$YC_FOLDER_ID"
 SUBNET_ID="$YC_SUBNET_ID"
 VM_NAME="project-sem1-vm"
@@ -16,6 +43,10 @@ chmod 600 /tmp/yc-key
 # Создаем временный файл для публичного ключа
 echo "$YC_SSH_PUBLIC_KEY" > /tmp/yc-key.pub
 chmod 644 /tmp/yc-key.pub
+
+# Создаем профиль yc для неинтерактивного режима
+yc config set folder-id $FOLDER_ID
+yc config set compute-default-zone $VM_ZONE
 
 echo "Creating VM in Yandex Cloud..."
 
@@ -55,6 +86,17 @@ echo "VM public IP: $VM_IP"
 # Ждем, пока VM полностью запустится
 echo "Waiting for VM to initialize..."
 sleep 30
+
+# Проверяем доступность SSH
+echo "Checking SSH connection..."
+for i in {1..30}; do
+    if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i /tmp/yc-key ubuntu@$VM_IP "echo OK" 2>/dev/null; then
+        echo "SSH connection successful"
+        break
+    fi
+    echo "Waiting for SSH... $i/30"
+    sleep 5
+done
 
 # Создаем docker-compose.yml
 cat > docker-compose.yml << 'EOF'

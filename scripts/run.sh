@@ -1,72 +1,165 @@
 #!/bin/bash
 set -e
+set -o pipefail
 
 echo "=== Deploying to Yandex Cloud (Complex Level) ==="
 
-# Конфигурация из GitHub Secrets
-FOLDER_ID="${YC_FOLDER_ID:-b1gg9v1869p6b25d54uq}"
-SUBNET_ID="${YC_SUBNET_ID:-e9b5mhgqb5a7h1vphdp3}"
-VM_NAME="project-sem1-vm-$(date +%s)"  # Уникальное имя с timestamp
-VM_ZONE="ru-central1-a"
+# Переменные из GitHub Secrets
+YC_FOLDER_ID="${YC_FOLDER_ID}"
+YC_ZONE="ru-central1-a"  # Фиксируем зону
+YC_TOKEN="${YC_TOKEN}"
+YC_IMAGE_ID="fd8bnguet48kpk4ovt1u"  # Ubuntu 22.04 LTS
+INSTANCE_NAME="prices-app-$(date +%s)"
+SSH_USER="ubuntu"
+PUBLIC_KEY="${YC_SSH_PUBLIC_KEY}"
+PRIVATE_KEY="${YC_SSH_PRIVATE_KEY}"
+SSH_KEY_PATH="$HOME/.ssh/id_ed25519"
 
-# Создаем временный файл для SSH ключа
-SSH_KEY_FILE=$(mktemp)
-echo "$YC_SSH_PRIVATE_KEY" > "$SSH_KEY_FILE"
-chmod 600 "$SSH_KEY_FILE"
+echo "Setting up SSH keys..."
+mkdir -p "$HOME/.ssh"
+echo "$PUBLIC_KEY" >"$SSH_KEY_PATH.pub"
+echo "$PRIVATE_KEY" >"$SSH_KEY_PATH"
 
-# Проверка наличия yc CLI
-if ! command -v yc &> /dev/null; then
-    echo "Error: yc CLI not found. Please install it first."
+# Создаем SSH config
+cat > "$HOME/.ssh/config" <<EOF
+Host *
+    IdentityFile $SSH_KEY_PATH
+    IdentitiesOnly yes
+    StrictHostKeyChecking no
+EOF
+
+chmod 600 "$SSH_KEY_PATH"
+chmod 644 "$SSH_KEY_PATH.pub"
+chmod 600 "$HOME/.ssh/config"
+
+# Создаем cloud-init конфиг
+cat > cloud-init.yaml <<EOF
+#cloud-config
+users:
+  - name: $SSH_USER
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: sudo
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - $(echo "$PUBLIC_KEY")
+ssh_pwauth: no
+disable_root: true
+EOF
+
+# Настраиваем YC CLI
+echo "Configuring Yandex Cloud CLI..."
+yc config set token "$YC_TOKEN"
+
+# Проверяем, что токен работает
+echo "Checking YC authentication..."
+if ! yc config list &>/dev/null; then
+    echo "ERROR: Failed to authenticate with Yandex Cloud"
     exit 1
 fi
 
-# Проверка наличия SSH ключа
-if [ -z "$YC_SSH_PUBLIC_KEY" ]; then
-    echo "Error: SSH public key not found in environment"
-    exit 1
-fi
-
+# Создаем VM
 echo "Creating VM in Yandex Cloud..."
+YC_INSTANCE_ID=$(yc compute instance create \
+    --name "$INSTANCE_NAME" \
+    --folder-id "$YC_FOLDER_ID" \
+    --zone "$YC_ZONE" \
+    --network-interface subnet-name="default-$YC_ZONE",nat-ip-version=ipv4 \
+    --create-boot-disk size=20,image-id="$YC_IMAGE_ID" \
+    --memory=2 \
+    --cores=2 \
+    --metadata-from-file user-data=cloud-init.yaml \
+    --format json | jq -r '.id')
 
-# Создаем виртуальную машину
-VM_ID=$(yc compute instance create \
-  --name $VM_NAME \
-  --zone $VM_ZONE \
-  --folder-id $FOLDER_ID \
-  --platform standard-v3 \
-  --cores 2 \
-  --memory 4GB \
-  --create-boot-disk image-folder-id=standard-images,image-family=ubuntu-2204-lts,size=30GB \
-  --network-interface subnet-id=$SUBNET_ID,nat-ip-version=ipv4 \
-  --metadata ssh-keys="ubuntu:${YC_SSH_PUBLIC_KEY}" \
-  --format json | grep -o '"id": *"[^"]*"' | head -1 | cut -d'"' -f4)
-
-if [ -z "$VM_ID" ]; then
-    echo "Failed to create VM"
+if [ -z "$YC_INSTANCE_ID" ] || [ "$YC_INSTANCE_ID" = "null" ]; then
+    echo "ERROR: Failed to create VM"
     exit 1
 fi
 
-echo "VM created with ID: $VM_ID"
+echo "Instance ID: $YC_INSTANCE_ID"
 
-# Получаем IP адрес
-sleep 10  # Ждем, пока VM получит IP
-VM_IP=$(yc compute instance get $VM_ID \
-  --folder-id $FOLDER_ID \
-  --format json | grep -o '"one_to_one_nat": *{[^}]*"address": *"[^"]*"' | grep -o '"address": *"[^"]*"' | cut -d'"' -f4)
+# Получаем публичный IP
+echo "Getting public IP..."
+PUBLIC_IP=$(yc compute instance get --id "$YC_INSTANCE_ID" --format json | jq -r '.network_interfaces[0].primary_v4_address.one_to_one_nat.address')
 
-if [ -z "$VM_IP" ]; then
-    echo "Failed to get VM IP"
+if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = "null" ]; then
+    echo "ERROR: Failed to get public IP"
     exit 1
 fi
 
-echo "VM public IP: $VM_IP"
+echo "Public IP: $PUBLIC_IP"
 
-# Ждем, пока VM полностью запустится
-echo "Waiting for VM to initialize..."
-sleep 30
+# Ждем готовности SSH
+echo "Waiting for SSH to become available..."
+for i in {1..30}; do
+    if ssh -o ConnectTimeout=5 "$SSH_USER@$PUBLIC_IP" "echo ok" >/dev/null 2>&1; then
+        echo "SSH connection successful"
+        break
+    fi
+    echo "Waiting for SSH... $i/30"
+    sleep 10
+done
 
-# Создаем docker-compose.yml на лету
-cat > docker-compose.yml << 'EOF'
+# Устанавливаем Docker и Docker Compose
+echo "Installing Docker and Compose on remote server..."
+ssh "$SSH_USER@$PUBLIC_IP" <<'EOF'
+    set -e
+    echo "Removing old Docker versions..."
+    sudo apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+    
+    echo "Updating system..."
+    sudo apt update -y
+    
+    echo "Installing dependencies..."
+    sudo apt install -y ca-certificates curl
+    
+    echo "Adding Docker repository..."
+    sudo install -m 0755 -d /etc/apt/keyrings
+    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
+    
+    echo "Adding Docker repository to sources..."
+    sudo bash -c 'cat <<EOT > /etc/apt/sources.list.d/docker.sources
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: '$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")'
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc
+EOT'
+    
+    echo "Installing Docker..."
+    sudo apt update
+    sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    
+    echo "Starting Docker..."
+    sudo systemctl enable docker --now
+    
+    echo "Adding user to docker group..."
+    sudo usermod -aG docker $USER
+    
+    echo "Docker installation complete"
+EOF
+
+# Копируем файлы проекта
+echo "Copying project files to server..."
+scp -r \
+    Dockerfile \
+    go.mod \
+    go.sum \
+    main.go \
+    docker-compose.yml \
+    "$SSH_USER@$PUBLIC_IP:/home/$SSH_USER/"
+
+# Копируем директории
+for dir in handlers models utils db; do
+    if [ -d "$dir" ]; then
+        scp -r "$dir" "$SSH_USER@$PUBLIC_IP:/home/$SSH_USER/"
+    fi
+done
+
+# Создаем docker-compose.yml на сервере если его нет
+ssh "$SSH_USER@$PUBLIC_IP" <<'EOF'
+    if [ ! -f docker-compose.yml ]; then
+        cat > docker-compose.yml <<'YAML'
 version: '3.8'
 
 services:
@@ -86,13 +179,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   app:
-    image: project-sem1:latest
+    build: .
     container_name: app
-    build:
-      context: .
-      dockerfile: Dockerfile
     ports:
       - "8080:8080"
     environment:
@@ -104,74 +195,56 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   postgres_data:
-EOF
-
-# Копируем файлы на сервер
-echo "Copying files to server..."
-scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
-  -i "$SSH_KEY_FILE" \
-  Dockerfile \
-  go.mod \
-  go.sum \
-  main.go \
-  docker-compose.yml \
-  ubuntu@$VM_IP:~/
-
-# Копируем директории
-for dir in handlers models utils db; do
-    if [ -d "$dir" ]; then
-        scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
-          -i "$SSH_KEY_FILE" \
-          -r "$dir" \
-          ubuntu@$VM_IP:~/
+YAML
     fi
-done
-
-# Подключаемся к серверу и запускаем
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
-  -i "$SSH_KEY_FILE" ubuntu@$VM_IP << 'EOF'
-  echo "Setting up server..."
-  
-  # Установка Docker
-  sudo apt-get update
-  sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-  sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-  sudo apt-get update
-  sudo apt-get install -y docker-ce docker-compose
-  
-  # Добавление пользователя в группу docker
-  sudo usermod -aG docker $USER
-  
-  # Сборка и запуск
-  cd ~
-  sudo docker-compose build
-  sudo docker-compose up -d
-  
-  # Проверка
-  echo "Waiting for services to start..."
-  sleep 15
-  
-  echo "=== Service Status ==="
-  sudo docker-compose ps
-  
-  echo "=== Testing API ==="
-  curl -f http://localhost:8080/api/v0/prices || echo "API not ready yet"
-  
-  echo "=== Deployment logs ==="
-  sudo docker-compose logs --tail=50
 EOF
 
-echo "=== Deployment Complete ==="
-echo "Server IP: $VM_IP"
-echo "API available at: http://$VM_IP:8080"
-echo "SSH: ssh -i ~/.ssh/yc-key ubuntu@$VM_IP"
+# Собираем и запускаем приложение
+echo "Building and starting application on remote server..."
+ssh "$SSH_USER@$PUBLIC_IP" <<'EOF'
+    set -e
+    cd /home/$USER
+    
+    echo "Building Docker image..."
+    sudo docker build -t project-sem1:latest .
+    
+    echo "Starting services with Docker Compose..."
+    sudo docker compose up -d
+    
+    echo "Waiting for services to start..."
+    sleep 15
+    
+    echo "=== Container Status ==="
+    sudo docker compose ps
+    
+    echo "=== Testing API locally ==="
+    curl -f http://localhost:8080/api/v0/prices || echo "API not ready yet"
+    
+    echo "=== PostgreSQL Status ==="
+    sudo docker compose logs postgres --tail 20
+EOF
 
 # Сохраняем IP для тестов
-echo "$VM_IP" > vm_ip.txt
+echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+echo "API_HOST=http://$PUBLIC_IP:8080" >> $GITHUB_ENV
+echo "DB_HOST=$PUBLIC_IP" >> $GITHUB_ENV
 
-# Очистка
-rm -f "$SSH_KEY_FILE"
+echo "=== Deployment Complete ==="
+echo "Server IP: $PUBLIC_IP"
+echo "API available at: http://$PUBLIC_IP:8080"
+echo ""
+echo "To test the API:"
+echo "  curl http://$PUBLIC_IP:8080/api/v0/prices?start=2024-01-01&end=2024-01-31&min=100&max=1000"
+echo ""
+echo "To SSH into the server:"
+echo "  ssh ubuntu@$PUBLIC_IP"
+echo ""
+echo "To delete the VM when done:"
+echo "  yc compute instance delete --name $INSTANCE_NAME"
+
+# Сохраняем IP в файл для локального использования
+echo "$PUBLIC_IP" > vm_ip.txt

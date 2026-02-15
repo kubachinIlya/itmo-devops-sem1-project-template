@@ -1,3 +1,4 @@
+// handlers/prices.go
 package handlers
 
 import (
@@ -6,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"project_sem/db"
@@ -17,10 +19,10 @@ type PriceHandler struct {
 }
 
 func (h *PriceHandler) HandlePricesPost(w http.ResponseWriter, r *http.Request) {
-	// Получаем тип архива   ес оу ес
+	// Получаем тип архива
 	archiveType := r.URL.Query().Get("type")
 	if archiveType == "" {
-		archiveType = "zip"
+		archiveType = "zip" // По умолчанию zip
 	}
 
 	// Проверяем поддерживаемый тип
@@ -29,30 +31,76 @@ func (h *PriceHandler) HandlePricesPost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Читаем тело запроса
-	archiveData, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusBadRequest)
-		return
+	// --- Определяем, откуда читать данные ---
+	var archiveData []byte
+	var err error
+
+	// Проверяем Content-Type
+	contentType := r.Header.Get("Content-Type")
+
+	if strings.Contains(contentType, "multipart/form-data") {
+		// Это запрос от тестов (форма с файлом)
+		err = r.ParseMultipartForm(10 << 20) // 10 MB max
+		if err != nil {
+			http.Error(w, "Failed to parse multipart form: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		file, _, err := r.FormFile("file") // Имя поля - "file"
+		if err != nil {
+			http.Error(w, "Failed to get file from form: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		archiveData, err = io.ReadAll(file)
+		if err != nil {
+			http.Error(w, "Failed to read uploaded file: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else {
+		// Это запрос с бинарными данными в теле
+		archiveData, err = io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
 	}
-	defer r.Body.Close()
 
 	if len(archiveData) == 0 {
-		http.Error(w, "Empty request body", http.StatusBadRequest)
+		http.Error(w, "Empty request body or file", http.StatusBadRequest)
 		return
 	}
 
-	// Распаковываем архив и получаем CSV
+	// Пытаемся распаковать как архив
 	csvData, err := utils.ExtractCSVFromArchive(archiveData, archiveType)
 	if err != nil {
-		http.Error(w, "Failed to extract CSV from archive: "+err.Error(), http.StatusBadRequest)
+		// Если не получилось распаковать как архив, пробуем распарсить данные как CSV напрямую
+		items, parseErr := utils.ParseCSV(archiveData)
+		if parseErr != nil {
+			http.Error(w, "Failed to process data: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Вставляем данные в БД
+		stats, insertErr := db.InsertPriceItems(h.DB, items)
+		if insertErr != nil {
+			http.Error(w, "Failed to insert data: "+insertErr.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Возвращаем результат
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(stats)
 		return
 	}
 
-	// Парсим CSV
+	// Если дошли сюда, значит архив успешно распакован
 	items, err := utils.ParseCSV(csvData)
 	if err != nil {
-		http.Error(w, "Failed to parse CSV: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "Failed to parse CSV from archive: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 

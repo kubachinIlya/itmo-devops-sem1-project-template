@@ -22,11 +22,12 @@ func ExtractCSVFromArchive(data []byte, archiveType string) ([]byte, error) {
 }
 
 func extractFromZip(data []byte) ([]byte, error) {
+	// Проверяем, что это действительно ZIP архив
 	if len(data) < 4 {
 		return nil, fmt.Errorf("data too small to be a zip file")
 	}
 
-	// Проверяем сигнатуру ZIP (PK)
+	// Проверяем сигнатуру ZIP файла (PK)
 	if data[0] != 0x50 || data[1] != 0x4B {
 		return nil, fmt.Errorf("not a valid zip file: invalid header")
 	}
@@ -36,6 +37,7 @@ func extractFromZip(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("error reading zip: %v", err)
 	}
 
+	// Ищем CSV файл в архиве
 	for _, file := range reader.File {
 		if strings.HasSuffix(strings.ToLower(file.Name), ".csv") {
 			rc, err := file.Open()
@@ -61,26 +63,27 @@ func extractFromTar(data []byte) ([]byte, error) {
 	}
 
 	var tarReader *tar.Reader
+	var fileReader io.Reader = bytes.NewReader(data)
 
-	// Проверяем, является ли файл gzip сжатым
+	// Проверяем сигнатуру gzip (0x1F 0x8B)
 	if len(data) > 2 && data[0] == 0x1F && data[1] == 0x8B {
-		// Это gzip
+		// Это gzip сжатый tar
 		gzipReader, err := gzip.NewReader(bytes.NewReader(data))
 		if err != nil {
-			return nil, fmt.Errorf("error creating gzip reader: %v", err)
+			return nil, fmt.Errorf("error reading gzip: %v", err)
 		}
 		defer gzipReader.Close()
-		tarReader = tar.NewReader(gzipReader)
-	} else {
-		// Обычный tar
-		tarReader = tar.NewReader(bytes.NewReader(data))
+		fileReader = gzipReader
 	}
+
+	// Создаем tar reader
+	tarReader = tar.NewReader(fileReader)
 
 	// Ищем CSV файл
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
-			break
+			break // Конец архива
 		}
 		if err != nil {
 			return nil, fmt.Errorf("error reading tar: %v", err)
@@ -91,8 +94,9 @@ func extractFromTar(data []byte) ([]byte, error) {
 			continue
 		}
 
-		// Ищем CSV файл
+		// Проверяем, что это CSV файл
 		if strings.HasSuffix(strings.ToLower(header.Name), ".csv") {
+			// Читаем содержимое файла
 			var buf bytes.Buffer
 			_, err = io.Copy(&buf, tarReader)
 			if err != nil {

@@ -20,6 +20,9 @@ if ! command -v yc &> /dev/null; then
     
     # Добавляем yc в PATH для текущей сессии
     export PATH="$PATH:$HOME/yandex-cloud/bin"
+    
+    # Обновляем PATH для текущей сессии
+    source "$HOME/.bashrc" 2>/dev/null || true
 fi
 
 # Проверяем, что yc доступен
@@ -28,7 +31,7 @@ if ! command -v yc &> /dev/null; then
     exit 1
 fi
 
-echo "yc CLI version: $(yc --version)"
+echo "yc CLI version: $(yc --version | head -1)"
 
 # Используем секреты из окружения
 FOLDER_ID="$YC_FOLDER_ID"
@@ -44,13 +47,19 @@ chmod 600 /tmp/yc-key
 echo "$YC_SSH_PUBLIC_KEY" > /tmp/yc-key.pub
 chmod 644 /tmp/yc-key.pub
 
-# Создаем профиль yc для неинтерактивного режима
+# Настраиваем yc CLI (исправленная версия)
 yc config set folder-id $FOLDER_ID
 yc config set compute-default-zone $VM_ZONE
+
+# Проверяем настройки
+echo "YC config:"
+yc config list
 
 echo "Creating VM in Yandex Cloud..."
 
 # Создаем виртуальную машину
+echo "Creating VM with folder-id: $FOLDER_ID, subnet-id: $SUBNET_ID"
+
 VM_ID=$(yc compute instance create \
   --name $VM_NAME \
   --zone $VM_ZONE \
@@ -65,6 +74,17 @@ VM_ID=$(yc compute instance create \
 
 if [ -z "$VM_ID" ]; then
     echo "Failed to create VM"
+    echo "Trying to create VM with debug info..."
+    yc compute instance create \
+      --name $VM_NAME \
+      --zone $VM_ZONE \
+      --folder-id $FOLDER_ID \
+      --platform standard-v3 \
+      --cores 2 \
+      --memory 4GB \
+      --create-boot-disk image-folder-id=standard-images,image-family=ubuntu-2204-lts,size=30GB \
+      --network-interface subnet-id=$SUBNET_ID,nat-ip-version=ipv4 \
+      --metadata ssh-keys="ubuntu:$(cat /tmp/yc-key.pub)"
     exit 1
 fi
 

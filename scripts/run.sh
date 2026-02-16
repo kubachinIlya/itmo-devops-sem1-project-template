@@ -1,4 +1,4 @@
-#!/bin/bash
+ #!/bin/bash
 set -e
 
 echo "=== Запуск в Yandex Cloud (сложный уровень) ==="
@@ -21,9 +21,9 @@ log "Настройка SSH ключей..."
 mkdir -p ~/.ssh
 chmod 700 ~/.ssh
 
-# Сохраняем ключи
-echo "$YC_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
-echo "$YC_SSH_PUBLIC_KEY" > ~/.ssh/id_ed25519.pub
+# Сохраняем ключи (убираем лишние пробелы и переносы строк)
+echo "$YC_SSH_PRIVATE_KEY" | sed 's/\r$//' > ~/.ssh/id_ed25519
+echo "$YC_SSH_PUBLIC_KEY" | sed 's/\r$//' > ~/.ssh/id_ed25519.pub
 chmod 600 ~/.ssh/id_ed25519
 chmod 644 ~/.ssh/id_ed25519.pub
 
@@ -37,9 +37,18 @@ Host *
 EOF
 chmod 600 ~/.ssh/config
 
-# Конфигурация Yandex Cloud
-yc config set token $YC_SA_KEY
+# Конфигурация Yandex Cloud через сервисный аккаунт
+log "Настройка Yandex Cloud CLI..."
+
+# Сохраняем JSON ключ во временный файл
+YC_SA_KEY_FILE="/tmp/yc-sa-key.json"
+echo "$YC_SA_KEY" > $YC_SA_KEY_FILE
+
+# Инициализируем через сервисный аккаунт
+yc config set service-account-key $YC_SA_KEY_FILE
 yc config set folder-id $YC_FOLDER_ID
+
+log "✅ Yandex Cloud CLI настроен"
 
 # Параметры
 YC_ZONE="ru-central1-a"
@@ -58,12 +67,14 @@ users:
     groups: sudo
     shell: /bin/bash
     ssh_authorized_keys:
-      - $(echo "$YC_SSH_PUBLIC_KEY")
+      - $(cat ~/.ssh/id_ed25519.pub)
 ssh_pwauth: no
 disable_root: true
 EOF
 
-# Удаляем старые VM
+log "Cloud-init config создан"
+
+# Проверяем существующие VM и удаляем
 log "Очистка старых VM..."
 OLD_VMS=$(yc compute instance list --format json | jq -r '.[] | select(.name | startswith("devops-vm-")) | .name' 2>/dev/null || echo "")
 if [ ! -z "$OLD_VMS" ]; then
@@ -76,21 +87,36 @@ fi
 # Создание виртуальной машины
 log "Создание виртуальной машины..."
 
-YC_INSTANCE_ID=$(yc compute instance create \
+# Проверяем существование подсети
+SUBNET_NAME="default-$YC_ZONE"
+log "Используем подсеть: $SUBNET_NAME"
+
+# Создаем VM
+VM_CREATE_OUTPUT=$(yc compute instance create \
     --name "$INSTANCE_NAME" \
     --folder-id "$YC_FOLDER_ID" \
     --zone "$YC_ZONE" \
-    --network-interface subnet-name=default-$YC_ZONE,nat-ip-version=ipv4 \
+    --network-interface subnet-name=$SUBNET_NAME,nat-ip-version=ipv4 \
     --create-boot-disk size=30,image-id="$YC_IMAGE_ID" \
     --memory=4 \
     --cores=2 \
     --platform standard-v3 \
     --preemptible \
     --metadata-from-file user-data=cloud-init.yaml \
-    --format json | jq -r '.id')
+    --format json 2>&1) || {
+        log "❌ Ошибка создания VM:"
+        echo "$VM_CREATE_OUTPUT"
+        rm -f cloud-init.yaml $YC_SA_KEY_FILE
+        exit 1
+    }
+
+# Извлекаем ID VM
+YC_INSTANCE_ID=$(echo "$VM_CREATE_OUTPUT" | jq -r '.id' 2>/dev/null || echo "")
 
 if [ -z "$YC_INSTANCE_ID" ] || [ "$YC_INSTANCE_ID" == "null" ]; then
-    log "❌ Ошибка создания VM"
+    log "❌ Не удалось получить ID VM"
+    echo "$VM_CREATE_OUTPUT"
+    rm -f cloud-init.yaml $YC_SA_KEY_FILE
     exit 1
 fi
 
@@ -99,7 +125,7 @@ log "✅ Instance ID: $YC_INSTANCE_ID"
 # Получение публичного IP
 log "Получение IP адреса..."
 for i in {1..30}; do
-    PUBLIC_IP=$(yc compute instance get --id "$YC_INSTANCE_ID" --format json | jq -r '.network_interfaces[0].primary_v4_address.one_to_one_nat.address')
+    PUBLIC_IP=$(yc compute instance get --id "$YC_INSTANCE_ID" --format json 2>/dev/null | jq -r '.network_interfaces[0].primary_v4_address.one_to_one_nat.address')
     if [ ! -z "$PUBLIC_IP" ] && [ "$PUBLIC_IP" != "null" ]; then
         log "✅ Public IP: $PUBLIC_IP"
         break
@@ -110,6 +136,7 @@ done
 
 if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" == "null" ]; then
     log "❌ Не удалось получить IP адрес"
+    rm -f cloud-init.yaml $YC_SA_KEY_FILE
     exit 1
 fi
 
@@ -129,9 +156,11 @@ for i in {1..30}; do
     sleep 10
     if [ $i -eq 30 ]; then
         log "❌ SSH не доступен после 30 попыток"
+        rm -f cloud-init.yaml $YC_SA_KEY_FILE
         exit 1
     fi
 done
+ 
 
 # Установка Docker
 log "Установка Docker..."

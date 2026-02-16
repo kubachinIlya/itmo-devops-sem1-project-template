@@ -83,7 +83,7 @@ CREATE_OUTPUT=$(yc compute instance create \
     --name "$INSTANCE_NAME" \
     --folder-id "$YC_FOLDER_ID" \
     --zone "$YC_ZONE" \
-    --network-interface subnet-name=default-$YC_ZONE,security-group-id=$DEFAULT_SG_ID,nat-ip-version=ipv4 \
+    --network-interface subnet-name=default-$YC_ZONE,security-group-ids=$DEFAULT_SG_ID,nat-ip-version=ipv4 \
     --create-boot-disk size=30,image-id="$YC_IMAGE_ID" \
     --memory=4 \
     --cores=2 \

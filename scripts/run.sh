@@ -67,7 +67,7 @@ disable_root: true
 EOF
 
 # Находим ID группы безопасности
-DEFAULT_SG_ID="enpt8kc9c5015ktou1kj"  # ID из вашего вывода
+DEFAULT_SG_ID="enpt8kc9c5015ktou1kj"
 log "Используем группу безопасности: $DEFAULT_SG_ID"
 
 # Создание виртуальной машины
@@ -91,7 +91,6 @@ yc compute instance create \
 # Проверяем, что файл не пустой и содержит JSON
 if [ ! -s $TMP_OUTPUT ]; then
     log "❌ Пустой вывод от yc"
-    cat $TMP_OUTPUT
     rm -f cloud-init.yaml $YC_SA_KEY_FILE $TMP_OUTPUT
     exit 1
 fi
@@ -170,11 +169,6 @@ done
 # Очистка временных файлов
 rm -f cloud-init.yaml $YC_SA_KEY_FILE
 
-# Дальше установка Docker, копирование и т.д...
-log "✅ VM готова, продолжаем настройку..."
-
-# ... (предыдущая часть скрипта без изменений до установки Docker)
-
 # Установка Docker
 log "Установка Docker..."
 ssh "$SSH_USER@$PUBLIC_IP" <<'EOF'
@@ -233,8 +227,14 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     
     # Проверяем наличие Dockerfile
     if [ ! -f Dockerfile ]; then
-        echo "❌ Dockerfile не найден!"
-        exit 1
+        # Пробуем переименовать dockerfile в Dockerfile
+        if [ -f dockerfile ]; then
+            echo "Переименовываем dockerfile в Dockerfile..."
+            mv dockerfile Dockerfile
+        else
+            echo "❌ Dockerfile не найден!"
+            exit 1
+        fi
     fi
     
     # Сборка Docker образа
@@ -262,7 +262,8 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     sudo docker ps | grep devops-app
     sudo docker logs devops-app --tail 20
 EOF
-# После запуска приложения добавьте диагностику
+
+# Диагностика
 log "Диагностика запущенных контейнеров..."
 ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     echo "=== Docker контейнеры ==="
@@ -275,10 +276,7 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     sudo docker logs devops-app --tail 50
     
     echo -e "\n=== Проверка портов ==="
-    sudo netstat -tulpn | grep -E ':(8080|5432)'
-    
-    echo -e "\n=== Проверка изнутри контейнера ==="
-    sudo docker exec devops-app curl -s http://localhost:8080/api/v0/prices || echo "❌ API не отвечает внутри контейнера"
+    sudo netstat -tulpn | grep -E ':(8080|5432)' || echo "Порты не найдены"
     
     echo -e "\n=== Проверка с localhost ==="
     curl -s http://localhost:8080/api/v0/prices || echo "❌ API не отвечает на localhost"
@@ -288,6 +286,7 @@ EOF
 log "Проверка доступности портов извне..."
 nc -zv $PUBLIC_IP 8080 || echo "❌ Порт 8080 недоступен"
 nc -zv $PUBLIC_IP 5432 || echo "❌ Порт 5432 недоступен"
+
 # Проверка API
 log "Проверка API..."
 for i in {1..10}; do

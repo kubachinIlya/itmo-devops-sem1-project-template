@@ -118,7 +118,7 @@ rm -f $TMP_OUTPUT
 
 # Получение публичного IP
 log "Получение IP адреса..."
-for i in {1..30}; do
+for i in {1..10}; do
     # Сохраняем вывод get instance в файл
     GET_OUTPUT="/tmp/vm_get_output.json"
     yc compute instance get --id "$YC_INSTANCE_ID" --format json > $GET_OUTPUT 2>&1
@@ -130,7 +130,7 @@ for i in {1..30}; do
         log "✅ Public IP: $PUBLIC_IP"
         break
     fi
-    log "Попытка $i/30..."
+    log "Попытка $i/10..."
     sleep 2
 done
 
@@ -147,15 +147,15 @@ log "IP сохранен в vm_ip.txt: $PUBLIC_IP"
 
 # Ожидание SSH
 log "Ожидание SSH..."
-for i in {1..30}; do
-    log "Попытка $i/30..."
+for i in {1..10}; do
+    log "Попытка $i/10..."
     if ssh -o ConnectTimeout=10 "$SSH_USER@$PUBLIC_IP" "echo ok" >/dev/null 2>&1; then
         log "✅ SSH доступен"
         break
     fi
     sleep 10
-    if [ $i -eq 30 ]; then
-        log "❌ SSH не доступен после 30 попыток"
+    if [ $i -eq 10 ]; then
+        log "❌ SSH не доступен после 10 попыток"
         rm -f cloud-init.yaml $YC_SA_KEY_FILE
         exit 1
     fi
@@ -284,13 +284,13 @@ nc -zv $PUBLIC_IP 8080 || echo "❌ Порт 8080 недоступен"
 nc -zv $PUBLIC_IP 5432 || echo "❌ Порт 5432 недоступен"
 # Проверка API
 log "Проверка API..."
-for i in {1..30}; do
+for i in {1..10}; do
     HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$PUBLIC_IP:8080/api/v0/prices || echo "000")
     if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "404" ]; then
         log "✅ API доступен (код $HTTP_STATUS)"
         break
     fi
-    log "Ожидание API... $i/30 (статус: $HTTP_STATUS)"
+    log "Ожидание API... $i/10 (статус: $HTTP_STATUS)"
     sleep 5
 done
 

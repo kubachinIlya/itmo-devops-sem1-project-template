@@ -256,7 +256,32 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     sudo docker ps | grep devops-app
     sudo docker logs devops-app --tail 20
 EOF
+# После запуска приложения добавьте диагностику
+log "Диагностика запущенных контейнеров..."
+ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
+    echo "=== Docker контейнеры ==="
+    sudo docker ps -a
+    
+    echo -e "\n=== Логи PostgreSQL ==="
+    sudo docker logs postgres-db --tail 20
+    
+    echo -e "\n=== Логи приложения ==="
+    sudo docker logs devops-app --tail 50
+    
+    echo -e "\n=== Проверка портов ==="
+    sudo netstat -tulpn | grep -E ':(8080|5432)'
+    
+    echo -e "\n=== Проверка изнутри контейнера ==="
+    sudo docker exec devops-app curl -s http://localhost:8080/api/v0/prices || echo "❌ API не отвечает внутри контейнера"
+    
+    echo -e "\n=== Проверка с localhost ==="
+    curl -s http://localhost:8080/api/v0/prices || echo "❌ API не отвечает на localhost"
+EOF
 
+# Проверка доступности портов снаружи
+log "Проверка доступности портов извне..."
+nc -zv $PUBLIC_IP 8080 || echo "❌ Порт 8080 недоступен"
+nc -zv $PUBLIC_IP 5432 || echo "❌ Порт 5432 недоступен"
 # Проверка API
 log "Проверка API..."
 for i in {1..30}; do

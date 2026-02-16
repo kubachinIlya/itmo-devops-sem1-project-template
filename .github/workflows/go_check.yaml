@@ -2,140 +2,98 @@ name: Go Test Pipeline
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
 
 jobs:
-  # Job 1: Локальное тестирование
-  local-tests:
-    name: Local Tests
+  test:
+    name: Run Tests
     runs-on: ubuntu-latest
 
-    services:
-      postgres:
-        image: postgres:15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23"
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh
+
+      - name: Prepare environment
+        run: ./scripts/prepare.sh
+
+      - name: Install yc
+        uses: lxhan/yc-install@v3
+
+      - name: Run application in Yandex Cloud
+        id: deploy
+        run: ./scripts/run.sh
         env:
-          POSTGRES_DB: project-sem-1
-          POSTGRES_USER: validator
-          POSTGRES_PASSWORD: val1dat0r
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
+          YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
+          YC_SUBNET_ID: ${{ secrets.YC_SUBNET_ID }}
+          YC_SSH_PRIVATE_KEY: ${{ secrets.YC_SSH_PRIVATE_KEY }}
+          YC_SSH_PUBLIC_KEY: ${{ secrets.YC_SSH_PUBLIC_KEY }}
 
-    steps:
-    - uses: actions/checkout@v3
+      - name: Set environment variables from deployment
+        run: |
+          if [ -f vm_ip.txt ]; then
+            IP=$(cat vm_ip.txt)
+            echo "API_HOST=http://$IP:8080" >> $GITHUB_ENV
+            echo "DB_HOST=$IP" >> $GITHUB_ENV
+            echo "VM_IP=$IP" >> $GITHUB_ENV
+            echo "✅ API_HOST=http://$IP:8080"
+            echo "✅ DB_HOST=$IP"
+          fi
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.23'
+      - name: Test Level 1
+        id: test-level-1
+        continue-on-error: true
+        run: ./scripts/tests.sh 1
+        env:
+          API_HOST: ${{ env.API_HOST }}
+          DB_HOST: ${{ env.DB_HOST }}
+          DB_PORT: 5432
+          DB_NAME: project-sem-1
+          DB_USER: validator
+          DB_PASSWORD: val1dat0r
 
-    - name: Make scripts executable
-      run: |
-        chmod +x scripts/prepare.sh
-        chmod +x scripts/run-local.sh
-        chmod +x scripts/tests.sh
+      - name: Test Level 2
+        id: test-level-2
+        continue-on-error: true
+        run: ./scripts/tests.sh 2
+        env:
+          API_HOST: ${{ env.API_HOST }}
+          DB_HOST: ${{ env.DB_HOST }}
+          DB_PORT: 5432
+          DB_NAME: project-sem-1
+          DB_USER: validator
+          DB_PASSWORD: val1dat0r
 
-    - name: Prepare environment
-      run: ./scripts/prepare.sh
+      - name: Test Level 3
+        id: test-level-3
+        continue-on-error: true
+        run: ./scripts/tests.sh 3
+        env:
+          API_HOST: ${{ env.API_HOST }}
+          DB_HOST: ${{ env.DB_HOST }}
+          DB_PORT: 5432
+          DB_NAME: project-sem-1
+          DB_USER: validator
+          DB_PASSWORD: val1dat0r
 
-    - name: Run application locally
-      run: |
-        go run main.go &
-        echo "APP_PID=$!" >> $GITHUB_ENV
-        sleep 10
-
-    - name: Test Level 1
-      id: test-level-1
-      continue-on-error: true
-      run: ./scripts/tests.sh 1
-
-    - name: Test Level 2
-      id: test-level-2
-      continue-on-error: true
-      run: ./scripts/tests.sh 2
-
-    - name: Test Level 3
-      id: test-level-3
-      continue-on-error: true
-      run: ./scripts/tests.sh 3
-
-    - name: Check test results
-      if: always()
-      run: |
-        if [[ "${{ steps.test-level-1.outcome }}" == "success" ]] || \
-           [[ "${{ steps.test-level-2.outcome }}" == "success" ]] || \
-           [[ "${{ steps.test-level-3.outcome }}" == "success" ]]; then
-          echo "At least one test level passed successfully!"
-          exit 0
-        else
-          echo "All test levels failed!"
-          exit 1
-        fi
-
-  # Job 2: Деплой в Yandex Cloud
-  deploy-yandex:
-    name: Deploy to Yandex Cloud
-    runs-on: ubuntu-latest
-    needs: local-tests
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Make scripts executable
-      run: chmod +x scripts/run.sh
-
-    - name: Deploy to Yandex Cloud
-      id: deploy
-      run: ./scripts/run.sh
-      env:
-        YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
-        YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
-        YC_SUBNET_ID: ${{ secrets.YC_SUBNET_ID }}
-        YC_SSH_PRIVATE_KEY: ${{ secrets.YC_SSH_PRIVATE_KEY }}
-        YC_SSH_PUBLIC_KEY: ${{ secrets.YC_SSH_PUBLIC_KEY }}
-
-    - name: Save VM IP
-      run: |
-        if [ -f vm_ip.txt ]; then
-          IP=$(cat vm_ip.txt)
-          echo "VM_IP_ADDRESS=$IP" >> $GITHUB_ENV
-          echo "✅ VM IP: $IP"
-        fi
-
-    # Опционально: протестировать на удаленной VM
-    - name: Test on remote VM
-      run: |
-        if [ -f vm_ip.txt ]; then
-          export VM_IP_ADDRESS=$(cat vm_ip.txt)
-          ./scripts/tests.sh 3
-        fi
-      env:
-        VM_IP_ADDRESS: ${{ env.VM_IP_ADDRESS }}
-
-  # Job 3: Сборка Docker образа
-  docker:
-    name: Build Docker Image
-    runs-on: ubuntu-latest
-    needs: local-tests
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    steps:
-    - uses: actions/checkout@v3
-    
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
-    
-    - name: Build Docker image
-      uses: docker/build-push-action@v4
-      with:
-        context: .
-        push: false
-        tags: devops-project:latest
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+      - name: Check test results
+        if: always()
+        run: |
+          if [[ "${{ steps.test-level-1.outcome }}" == "success" ]] || \
+             [[ "${{ steps.test-level-2.outcome }}" == "success" ]] || \
+             [[ "${{ steps.test-level-3.outcome }}" == "success" ]]; then
+            echo "At least one test level passed successfully!"
+            exit 0
+          else
+            echo "All test levels failed!"
+            exit 1
+          fi

@@ -73,9 +73,13 @@ log "Используем группу безопасности: $DEFAULT_SG_ID"
 # Создание виртуальной машины
 log "Создание виртуальной машины $INSTANCE_NAME..."
 
-# Создаем VM с группой безопасности
+# Создаем VM с группой безопасности и сохраняем ВЕСЬ вывод
 TMP_OUTPUT="/tmp/vm_create_output.json"
-yc compute instance create \
+log "Запускаем команду создания VM..."
+
+# Выполняем команду и сохраняем вывод
+set +e  # Временно отключаем exit on error
+CREATE_OUTPUT=$(yc compute instance create \
     --name "$INSTANCE_NAME" \
     --folder-id "$YC_FOLDER_ID" \
     --zone "$YC_ZONE" \
@@ -86,7 +90,25 @@ yc compute instance create \
     --platform standard-v3 \
     --preemptible \
     --metadata-from-file user-data=cloud-init.yaml \
-    --format json > $TMP_OUTPUT 2>&1
+    --format json 2>&1)
+CREATE_EXIT_CODE=$?
+set -e  # Включаем обратно
+
+# Сохраняем вывод в файл
+echo "$CREATE_OUTPUT" > $TMP_OUTPUT
+
+# Логируем результат
+log "Exit code: $CREATE_EXIT_CODE"
+log "Вывод команды:"
+echo "$CREATE_OUTPUT" | while IFS= read -r line; do
+    log "  $line"
+done
+
+if [ $CREATE_EXIT_CODE -ne 0 ]; then
+    log "❌ Ошибка создания VM (код $CREATE_EXIT_CODE)"
+    rm -f cloud-init.yaml $YC_SA_KEY_FILE
+    exit 1
+fi
 
 # Проверяем, что файл не пустой и содержит JSON
 if [ ! -s $TMP_OUTPUT ]; then

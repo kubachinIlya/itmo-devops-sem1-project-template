@@ -265,9 +265,6 @@ log "Сборка и запуск приложения..."
 ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     cd /home/ubuntu/app
     
-    echo "Содержимое директории:"
-    ls -la
-    
     # Переименовываем dockerfile в Dockerfile если нужно
     if [ -f dockerfile ] && [ ! -f Dockerfile ]; then
         echo "Переименовываем dockerfile в Dockerfile..."
@@ -282,13 +279,38 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     echo "Сборка Docker образа приложения..."
     sudo docker build -t devops-app:latest .
     
+    # Остановка старых контейнеров
     sudo docker stop devops-app 2>/dev/null || true
     sudo docker rm devops-app 2>/dev/null || true
+    sudo docker stop postgres-db 2>/dev/null || true
+    sudo docker rm postgres-db 2>/dev/null || true
     
+    # Создаем сеть
+    sudo docker network create app-network 2>/dev/null || true
+    
+    # Запуск PostgreSQL
+    echo "Запуск PostgreSQL..."
+    sudo docker run -d \
+        --name postgres-db \
+        --network app-network \
+        -e POSTGRES_DB=project-sem-1 \
+        -e POSTGRES_USER=validator \
+        -e POSTGRES_PASSWORD=val1dat0r \
+        -p 5432:5432 \
+        -v postgres_data:/var/lib/postgresql/data \
+        --restart unless-stopped \
+        postgres:15
+    
+    echo "Ожидание PostgreSQL..."
+    sleep 10
+    
+    # Запуск приложения
+    echo "Запуск приложения..."
     sudo docker run -d \
         --name devops-app \
+        --network app-network \
         -p 8080:8080 \
-        -e POSTGRES_HOST=127.0.0.1 \  # ИЗМЕНЕНО: localhost -> 127.0.0.1
+        -e POSTGRES_HOST=postgres-db \
         -e POSTGRES_PORT=5432 \
         -e POSTGRES_DB=project-sem-1 \
         -e POSTGRES_USER=validator \
@@ -296,8 +318,9 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
         --restart unless-stopped \
         devops-app:latest
     
-    sleep 10
-    sudo docker ps | grep devops-app
+    echo "Проверка запуска..."
+    sleep 5
+    sudo docker ps | grep -E 'postgres-db|devops-app'
     sudo docker logs devops-app --tail 20
 EOF
  

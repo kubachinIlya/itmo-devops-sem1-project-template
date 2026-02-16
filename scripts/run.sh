@@ -301,27 +301,30 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     sudo docker logs devops-app --tail 20
 EOF
 
-# Диагностика
-log "Диагностика запущенных контейнеров..."
+ 
+log "  ДИАГНОСТИКА..."
 ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
-    echo "=== Docker контейнеры ==="
+    echo "=== 1. Запущенные контейнеры ==="
     sudo docker ps -a
     
-    echo -e "\n=== Логи PostgreSQL ==="
-    sudo docker logs postgres-db --tail 20
-    
-    echo -e "\n=== Логи приложения ==="
+    echo "=== 2. Логи приложения ==="
     sudo docker logs devops-app --tail 50
     
-    echo -e "\n=== Проверка портов ==="
-    sudo netstat -tulpn | grep -E ':(8080|5432)' || echo "Порты не найдены"
+    echo "=== 3. Проверка портов внутри VM ==="
+    sudo ss -tlnp | grep -E ':(8080|5432)'
     
-    echo -e "\n=== Проверка изнутри контейнера ==="
-    sudo docker exec devops-app curl -s http://localhost:8080/api/v0/prices || echo "❌ API не отвечает внутри контейнера"
+    echo "=== 4. Проверка изнутри VM ==="
+    curl -v http://localhost:8080/api/v0/prices || echo "❌ Локально не отвечает"
     
-    echo -e "\n=== Проверка с localhost ==="
-    curl -s http://localhost:8080/api/v0/prices || echo "❌ API не отвечает на localhost"
+    echo "=== 5. Проверка Docker сети ==="
+    sudo docker network ls
+    sudo docker inspect devops-app | grep -A 5 "NetworkSettings"
 EOF
+
+# Проверка снаружи
+log "=== 6. Проверка снаружи ==="
+nc -zv $PUBLIC_IP 8080
+curl -v http://$PUBLIC_IP:8080/api/v0/prices || echo "❌ Снаружи не отвечает"
 
 # Проверка портов снаружи
 log "Проверка доступности портов извне..."

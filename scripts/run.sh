@@ -300,7 +300,26 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     sudo docker ps | grep devops-app
     sudo docker logs devops-app --tail 20
 EOF
-
+ 
+log "  ДИАГНОСТИКА КОНТЕЙНЕРА"
+ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
+    echo "=== СОСТОЯНИЕ КОНТЕЙНЕРА ==="
+    sudo docker ps -a | grep devops-app
+    
+    echo -e "\n=== ЛОГИ КОНТЕЙНЕРА (важно!) ==="
+    sudo docker logs devops-app
+    
+    echo -e "\n=== ПРОВЕРКА БИЛДА ==="
+    cd /home/ubuntu/app
+    echo "Содержимое Dockerfile:"
+    cat Dockerfile
+    
+    echo -e "\n=== ПРОБА ЗАПУСКА ВРУЧНУЮ ==="
+    sudo docker run --rm devops-app:latest ls -la || echo "Образ битый"
+    
+    echo -e "\n=== ПРОВЕРКА ЗАВИСИМОСТЕЙ ==="
+    sudo docker run --rm devops-app:latest go version || echo "Нет Go"
+EOF
  
 log "  ДИАГНОСТИКА..."
 ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'

@@ -288,7 +288,7 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     sudo docker run -d \
         --name devops-app \
         -p 8080:8080 \
-        -e POSTGRES_HOST=localhost \
+        -e POSTGRES_HOST=127.0.0.1 \  # ИЗМЕНЕНО: localhost -> 127.0.0.1
         -e POSTGRES_PORT=5432 \
         -e POSTGRES_DB=project-sem-1 \
         -e POSTGRES_USER=validator \

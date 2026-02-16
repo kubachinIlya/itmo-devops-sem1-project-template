@@ -6,34 +6,13 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-# Конфигурация по умолчанию (локальная)
-API_HOST="http://localhost:8080"
-DB_HOST="localhost"
-DB_PORT="5432"
-DB_NAME="project-sem-1"
-DB_USER="validator"
-DB_PASSWORD="val1dat0r"
-
-# Определяем окружение
-if [ -f "vm_ip.txt" ]; then
-    VM_IP=$(cat vm_ip.txt | tr -d '\n' | tr -d '\r')
-    if [ ! -z "$VM_IP" ]; then
-        echo -e "${YELLOW}Обнаружен файл vm_ip.txt с IP: $VM_IP${NC}"
-        echo -e "${YELLOW}Переключаемся на облачное окружение...${NC}"
-        API_HOST="http://$VM_IP:8080"
-        DB_HOST="$VM_IP"
-    fi
-fi
-
-# Проверяем переменные окружения из GitHub Actions
-if [ ! -z "$VM_IP_ADDRESS" ]; then
-    echo -e "${YELLOW}Используем IP из переменной окружения: $VM_IP_ADDRESS${NC}"
-    API_HOST="http://$VM_IP_ADDRESS:8080"
-    DB_HOST="$VM_IP_ADDRESS"
-fi
-
-echo -e "${GREEN}Используем API: $API_HOST${NC}"
-echo -e "${GREEN}Используем DB: $DB_HOST${NC}"
+# Конфигурация
+API_HOST="${API_HOST:-http://localhost:8080}"
+DB_HOST="${DB_HOST:-localhost}"
+DB_PORT="${DB_PORT:-5432}"
+DB_NAME="${DB_NAME:-project-sem-1}"
+DB_USER="${DB_USER:-validator}"
+DB_PASSWORD="${DB_PASSWORD:-val1dat0r}"
 
 # Временные файлы для тестирования
 TEST_ZIP="test_data.zip"
@@ -69,46 +48,6 @@ create_test_files() {
     fi
 }
 
-# Функция для проверки доступности API
-wait_for_api() {
-    local max_attempts=30
-    local attempt=1
-    
-    echo "Ожидание доступности API..."
-    while [ $attempt -le $max_attempts ]; do
-        if curl -s -f "$API_HOST/api/v0/prices" > /dev/null 2>&1; then
-            echo -e "${GREEN}✓ API доступен${NC}"
-            return 0
-        fi
-        echo "Попытка $attempt/$max_attempts..."
-        sleep 2
-        attempt=$((attempt + 1))
-    done
-    
-    echo -e "${RED}✗ API недоступен после $max_attempts попыток${NC}"
-    return 1
-}
-
-# Функция для проверки доступности PostgreSQL
-wait_for_db() {
-    local max_attempts=30
-    local attempt=1
-    
-    echo "Ожидание доступности PostgreSQL..."
-    while [ $attempt -le $max_attempts ]; do
-        if PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c '\q' 2>/dev/null; then
-            echo -e "${GREEN}✓ PostgreSQL доступен${NC}"
-            return 0
-        fi
-        echo "Попытка $attempt/$max_attempts..."
-        sleep 2
-        attempt=$((attempt + 1))
-    done
-    
-    echo -e "${RED}✗ PostgreSQL недоступен после $max_attempts попыток${NC}"
-    return 1
-}
-
 check_api_simple() {
     create_test_files 1
 
@@ -116,13 +55,12 @@ check_api_simple() {
     
     # Проверка POST /api/v0/prices
     echo "Тестирование POST /api/v0/prices"
-    response=$(curl -s -F "file=@$TEST_CSV" "${API_HOST}/api/v0/prices")
+    response=$(curl -s -F "file=@$TEST_ZIP" "${API_HOST}/api/v0/prices")
     if [[ $response == *"total_items"* && $response == *"total_categories"* && $response == *"total_price"* ]]; then
         echo -e "${GREEN}✓ POST запрос успешен${NC}"
         
     else
         echo -e "${RED}✗ POST запрос неуспешен${NC}"
-        echo "Ответ: $response"
         return 1
     fi
     
@@ -176,7 +114,6 @@ check_api_advanced() {
         echo -e "${GREEN}✓ POST запрос с ZIP успешен${NC}"
     else
         echo -e "${RED}✗ POST запрос с ZIP неуспешен${NC}"
-        echo "Ответ: $response"
         return 1
     fi
     
@@ -187,11 +124,11 @@ check_api_advanced() {
         echo -e "${GREEN}✓ POST запрос с TAR успешен${NC}"
     else
         echo -e "${RED}✗ POST запрос с TAR неуспешен${NC}"
-        echo "Ответ: $response"
         return 1
     fi
     
-    return 0
+    # Проверка GET
+    check_api_simple
 }
 
 check_api_complex() {
@@ -216,7 +153,6 @@ check_api_complex() {
         echo -e "${GREEN}✓ Все обязательные поля присутствуют в ответе${NC}"
     else
         echo -e "${RED}✗ Отсутствуют обязательные поля: ${missing_fields[*]}${NC}"
-        echo "Ответ: $response"
         return 1
     fi
     
@@ -305,7 +241,7 @@ check_postgres() {
         1)  
             echo "Выполняем проверку уровня 1"
             if PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c "
-                SELECT COUNT(*) as total_items FROM prices;" 2>/dev/null; then
+                SELECT COUNT(*) FROM prices;" 2>/dev/null; then
                 echo -e "${GREEN}✓ PostgreSQL работает корректно${NC}"
                 return 0
             else
@@ -338,8 +274,10 @@ check_postgres() {
                         COUNT(*) as total_items,
                         COUNT(DISTINCT category) as total_categories,
                         SUM(price) as total_price,
-                        COUNT(*) - COUNT(DISTINCT (id, create_date)) as duplicates
+                        COUNT(*) - COUNT(DISTINCT (name, category, price)) as duplicates
                     FROM prices
+                    WHERE create_date BETWEEN '2024-01-01' AND '2024-01-31'
+                    AND price BETWEEN 300 AND 1000
                 )
                 SELECT * FROM stats;" 2>/dev/null; then
                 echo -e "${GREEN}✓ PostgreSQL работает корректно${NC}"
@@ -366,10 +304,6 @@ cleanup() {
 main() {
     local level=$1
     local failed=0
-    
-    # Ждем доступности сервисов
-    wait_for_api || return 1
-    wait_for_db || return 1
     
     case $level in
         1)

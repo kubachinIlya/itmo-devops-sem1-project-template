@@ -70,6 +70,28 @@ EOF
 DEFAULT_SG_ID="enpt8kc9c5015ktou1kj"  # ID из вывода
 log "Используем группу безопасности: $DEFAULT_SG_ID"
 
+
+
+# ПРИНУДИТЕЛЬНОЕ удаление всех старых VM
+log "Принудительное удаление всех старых VM..."
+OLD_VMS=$(yc compute instance list --format json | jq -r '.[].name' | grep "devops-vm-" || echo "")
+if [ ! -z "$OLD_VMS" ]; then
+    for OLD_VM in $OLD_VMS; do
+        log "Удаляем старую VM: $OLD_VM"
+        yc compute instance delete $OLD_VM  # Убрал --async чтобы удалилось сразу
+        sleep 5
+    done
+fi
+
+# Также удаляем VM из предыдущих запусков
+OLD_VMS=$(yc compute instance list --format json | jq -r '.[].name' | grep "devops-vm-" || echo "")
+if [ ! -z "$OLD_VMS" ]; then
+    log "❌ Все еще есть старые VM: $OLD_VMS"
+    exit 1
+else
+    log "✅ Все старые VM удалены"
+fi
+
 # Создание виртуальной машины
 log "Создание виртуальной машины $INSTANCE_NAME..."
 

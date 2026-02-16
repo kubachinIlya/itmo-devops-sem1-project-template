@@ -167,6 +167,8 @@ rm -f cloud-init.yaml $YC_SA_KEY_FILE
 # Дальше установка Docker, копирование и т.д...
 log "✅ VM готова, продолжаем настройку..."
 
+# ... (предыдущая часть скрипта без изменений до установки Docker)
+
 # Установка Docker
 log "Установка Docker..."
 ssh "$SSH_USER@$PUBLIC_IP" <<'EOF'
@@ -183,12 +185,20 @@ ssh "$SSH_USER@$PUBLIC_IP" <<'EOF'
     sudo systemctl start docker
 EOF
 
+# СОЗДАЕМ ДИРЕКТОРИЮ ПЕРЕД КОПИРОВАНИЕМ
+log "Создание директории app на сервере..."
+ssh "$SSH_USER@$PUBLIC_IP" "mkdir -p /home/$SSH_USER/app"
+
 # Копирование файлов проекта
 log "Копирование файлов проекта..."
 scp -r \
     -o ConnectTimeout=30 \
-    $(pwd) \
+    $(pwd)/* \
     "$SSH_USER@$PUBLIC_IP:/home/$SSH_USER/app/"
+
+# Проверяем, что файлы скопировались
+log "Проверка скопированных файлов..."
+ssh "$SSH_USER@$PUBLIC_IP" "ls -la /home/$SSH_USER/app/"
 
 # Запуск PostgreSQL
 log "Запуск PostgreSQL..."
@@ -210,9 +220,26 @@ EOF
 log "Сборка и запуск приложения..."
 ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     cd /home/ubuntu/app
+    
+    # Проверяем наличие файлов
+    echo "Содержимое директории:"
+    ls -la
+    
+    # Проверяем наличие Dockerfile
+    if [ ! -f Dockerfile ]; then
+        echo "❌ Dockerfile не найден!"
+        exit 1
+    fi
+    
+    # Сборка Docker образа
+    echo "Сборка Docker образа приложения..."
     sudo docker build -t devops-app:latest .
+    
+    # Остановка старого контейнера если есть
     sudo docker stop devops-app 2>/dev/null || true
     sudo docker rm devops-app 2>/dev/null || true
+    
+    # Запуск нового контейнера
     sudo docker run -d \
         --name devops-app \
         -p 8080:8080 \
@@ -223,8 +250,11 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
         -e POSTGRES_PASSWORD=val1dat0r \
         --restart unless-stopped \
         devops-app:latest
+    
+    # Проверка запуска
     sleep 10
     sudo docker ps | grep devops-app
+    sudo docker logs devops-app --tail 20
 EOF
 
 # Проверка API
@@ -235,7 +265,7 @@ for i in {1..30}; do
         log "✅ API доступен (код $HTTP_STATUS)"
         break
     fi
-    log "Ожидание API... $i/30"
+    log "Ожидание API... $i/30 (статус: $HTTP_STATUS)"
     sleep 5
 done
 

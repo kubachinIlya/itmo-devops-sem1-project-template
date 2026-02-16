@@ -67,7 +67,7 @@ disable_root: true
 EOF
 
 # Находим ID группы безопасности
-DEFAULT_SG_ID="enpt8kc9c5015ktou1kj"
+DEFAULT_SG_ID="enpt8kc9c5015ktou1kj"  # ID из вывода
 log "Используем группу безопасности: $DEFAULT_SG_ID"
 
 # Создание виртуальной машины
@@ -91,6 +91,7 @@ yc compute instance create \
 # Проверяем, что файл не пустой и содержит JSON
 if [ ! -s $TMP_OUTPUT ]; then
     log "❌ Пустой вывод от yc"
+    cat $TMP_OUTPUT
     rm -f cloud-init.yaml $YC_SA_KEY_FILE $TMP_OUTPUT
     exit 1
 fi
@@ -103,7 +104,7 @@ if [ -z "$YC_INSTANCE_ID" ] || [ "$YC_INSTANCE_ID" == "null" ]; then
     log "Содержимое вывода:"
     cat $TMP_OUTPUT
     
-    # Пробуем найти VM по имени как запасной вариант
+    # Пробуем найти VM по имени
     log "Пробуем найти VM по имени..."
     sleep 10
     YC_INSTANCE_ID=$(yc compute instance list --format json | jq -r ".[] | select(.name==\"$INSTANCE_NAME\") | .id" 2>/dev/null || echo "")
@@ -124,7 +125,6 @@ rm -f $TMP_OUTPUT
 # Получение публичного IP
 log "Получение IP адреса..."
 for i in {1..10}; do
-    # Сохраняем вывод get instance в файл
     GET_OUTPUT="/tmp/vm_get_output.json"
     yc compute instance get --id "$YC_INSTANCE_ID" --format json > $GET_OUTPUT 2>&1
     
@@ -185,7 +185,7 @@ ssh "$SSH_USER@$PUBLIC_IP" <<'EOF'
     sudo systemctl start docker
 EOF
 
-# СОЗДАЕМ ДИРЕКТОРИЮ ПЕРЕД КОПИРОВАНИЕМ
+# Создание директории app
 log "Создание директории app на сервере..."
 ssh "$SSH_USER@$PUBLIC_IP" "mkdir -p /home/$SSH_USER/app"
 
@@ -196,7 +196,7 @@ scp -r \
     $(pwd)/* \
     "$SSH_USER@$PUBLIC_IP:/home/$SSH_USER/app/"
 
-# Проверяем, что файлы скопировались
+# Проверка скопированных файлов
 log "Проверка скопированных файлов..."
 ssh "$SSH_USER@$PUBLIC_IP" "ls -la /home/$SSH_USER/app/"
 
@@ -221,31 +221,26 @@ log "Сборка и запуск приложения..."
 ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     cd /home/ubuntu/app
     
-    # Проверяем наличие файлов
     echo "Содержимое директории:"
     ls -la
     
-    # Проверяем наличие Dockerfile
-    if [ ! -f Dockerfile ]; then
-        # Пробуем переименовать dockerfile в Dockerfile
-        if [ -f dockerfile ]; then
-            echo "Переименовываем dockerfile в Dockerfile..."
-            mv dockerfile Dockerfile
-        else
-            echo "❌ Dockerfile не найден!"
-            exit 1
-        fi
+    # Переименовываем dockerfile в Dockerfile если нужно
+    if [ -f dockerfile ] && [ ! -f Dockerfile ]; then
+        echo "Переименовываем dockerfile в Dockerfile..."
+        mv dockerfile Dockerfile
     fi
     
-    # Сборка Docker образа
+    if [ ! -f Dockerfile ]; then
+        echo "❌ Dockerfile не найден!"
+        exit 1
+    fi
+    
     echo "Сборка Docker образа приложения..."
     sudo docker build -t devops-app:latest .
     
-    # Остановка старого контейнера если есть
     sudo docker stop devops-app 2>/dev/null || true
     sudo docker rm devops-app 2>/dev/null || true
     
-    # Запуск нового контейнера
     sudo docker run -d \
         --name devops-app \
         -p 8080:8080 \
@@ -257,7 +252,6 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
         --restart unless-stopped \
         devops-app:latest
     
-    # Проверка запуска
     sleep 10
     sudo docker ps | grep devops-app
     sudo docker logs devops-app --tail 20
@@ -278,11 +272,14 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     echo -e "\n=== Проверка портов ==="
     sudo netstat -tulpn | grep -E ':(8080|5432)' || echo "Порты не найдены"
     
+    echo -e "\n=== Проверка изнутри контейнера ==="
+    sudo docker exec devops-app curl -s http://localhost:8080/api/v0/prices || echo "❌ API не отвечает внутри контейнера"
+    
     echo -e "\n=== Проверка с localhost ==="
     curl -s http://localhost:8080/api/v0/prices || echo "❌ API не отвечает на localhost"
 EOF
 
-# Проверка доступности портов снаружи
+# Проверка портов снаружи
 log "Проверка доступности портов извне..."
 nc -zv $PUBLIC_IP 8080 || echo "❌ Порт 8080 недоступен"
 nc -zv $PUBLIC_IP 5432 || echo "❌ Порт 5432 недоступен"

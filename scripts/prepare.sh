@@ -5,6 +5,6 @@ echo "=== Подготовка окружения (сложный уровень
 
 # Сборка Docker образа
 echo "Сборка Docker образа..."
-docker build -t devops-project:latest .
+docker build -t devops-project:latest . && echo " Docker образ собран успешно" || echo "Failed to build docker image"
 
-echo " Docker образ собран успешно"
+

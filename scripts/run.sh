@@ -1,4 +1,4 @@
- #!/bin/bash
+#!/bin/bash
 set -e
 
 echo "=== Запуск в Yandex Cloud (сложный уровень) ==="
@@ -16,12 +16,12 @@ if ! command -v yc &> /dev/null; then
     source /home/runner/.bashrc
 fi
 
-# Настройка SSH ключей из GitHub Secrets
+# Настройка SSH ключей
 log "Настройка SSH ключей..."
 mkdir -p ~/.ssh
 chmod 700 ~/.ssh
 
-# Сохраняем ключи (убираем лишние пробелы и переносы строк)
+# Сохраняем ключи
 echo "$YC_SSH_PRIVATE_KEY" | sed 's/\r$//' > ~/.ssh/id_ed25519
 echo "$YC_SSH_PUBLIC_KEY" | sed 's/\r$//' > ~/.ssh/id_ed25519.pub
 chmod 600 ~/.ssh/id_ed25519
@@ -37,18 +37,12 @@ Host *
 EOF
 chmod 600 ~/.ssh/config
 
-# Конфигурация Yandex Cloud через сервисный аккаунт
+# Конфигурация Yandex Cloud
 log "Настройка Yandex Cloud CLI..."
-
-# Сохраняем JSON ключ во временный файл
 YC_SA_KEY_FILE="/tmp/yc-sa-key.json"
 echo "$YC_SA_KEY" > $YC_SA_KEY_FILE
-
-# Инициализируем через сервисный аккаунт
 yc config set service-account-key $YC_SA_KEY_FILE
 yc config set folder-id $YC_FOLDER_ID
-
-log "✅ Yandex Cloud CLI настроен"
 
 # Параметры
 YC_ZONE="ru-central1-a"
@@ -58,7 +52,7 @@ YC_IMAGE_ID="fd8bnguet48kpk4ovt1u" # Ubuntu 22.04 LTS
 
 log "Создание VM: $INSTANCE_NAME"
 
-# Создаем cloud-init конфиг для правильной настройки пользователя
+# Создаем cloud-init конфиг
 cat > cloud-init.yaml << EOF
 #cloud-config
 users:
@@ -72,60 +66,66 @@ ssh_pwauth: no
 disable_root: true
 EOF
 
-log "Cloud-init config создан"
-
-# Проверяем существующие VM и удаляем
-log "Очистка старых VM..."
-OLD_VMS=$(yc compute instance list --format json | jq -r '.[] | select(.name | startswith("devops-vm-")) | .name' 2>/dev/null || echo "")
-if [ ! -z "$OLD_VMS" ]; then
-    for OLD_VM in $OLD_VMS; do
-        log "Удаляем старую VM: $OLD_VM"
-        yc compute instance delete $OLD_VM --async > /dev/null 2>&1
-    done
-fi
-
-# Создание виртуальной машины
-log "Создание виртуальной машины..."
-
-# Проверяем существование подсети
-SUBNET_NAME="default-$YC_ZONE"
-log "Используем подсеть: $SUBNET_NAME"
-
-# Создаем VM
-VM_CREATE_OUTPUT=$(yc compute instance create \
+# Создание виртуальной машины и сохранение вывода в файл
+log "Запуск создания VM..."
+TMP_OUTPUT="/tmp/vm_create_output.json"
+yc compute instance create \
     --name "$INSTANCE_NAME" \
     --folder-id "$YC_FOLDER_ID" \
     --zone "$YC_ZONE" \
-    --network-interface subnet-name=$SUBNET_NAME,nat-ip-version=ipv4 \
+    --network-interface subnet-name=default-$YC_ZONE,nat-ip-version=ipv4 \
     --create-boot-disk size=30,image-id="$YC_IMAGE_ID" \
     --memory=4 \
     --cores=2 \
     --platform standard-v3 \
     --preemptible \
     --metadata-from-file user-data=cloud-init.yaml \
-    --format json 2>&1) || {
-        log "❌ Ошибка создания VM:"
-        echo "$VM_CREATE_OUTPUT"
-        rm -f cloud-init.yaml $YC_SA_KEY_FILE
-        exit 1
-    }
+    --format json > $TMP_OUTPUT 2>&1
 
-# Извлекаем ID VM
-YC_INSTANCE_ID=$(echo "$VM_CREATE_OUTPUT" | jq -r '.id' 2>/dev/null || echo "")
-
-if [ -z "$YC_INSTANCE_ID" ] || [ "$YC_INSTANCE_ID" == "null" ]; then
-    log "❌ Не удалось получить ID VM"
-    echo "$VM_CREATE_OUTPUT"
-    rm -f cloud-init.yaml $YC_SA_KEY_FILE
+# Проверяем, что файл не пустой и содержит JSON
+if [ ! -s $TMP_OUTPUT ]; then
+    log "❌ Пустой вывод от yc"
+    cat $TMP_OUTPUT
+    rm -f cloud-init.yaml $YC_SA_KEY_FILE $TMP_OUTPUT
     exit 1
 fi
 
-log "✅ Instance ID: $YC_INSTANCE_ID"
+# Извлекаем ID VM
+YC_INSTANCE_ID=$(jq -r '.id' $TMP_OUTPUT 2>/dev/null || echo "")
+
+if [ -z "$YC_INSTANCE_ID" ] || [ "$YC_INSTANCE_ID" == "null" ]; then
+    log "❌ Не удалось получить ID VM"
+    log "Содержимое вывода:"
+    cat $TMP_OUTPUT
+    
+    # Пробуем найти VM по имени как запасной вариант
+    log "Пробуем найти VM по имени..."
+    sleep 10
+    YC_INSTANCE_ID=$(yc compute instance list --format json | jq -r ".[] | select(.name==\"$INSTANCE_NAME\") | .id" 2>/dev/null || echo "")
+    
+    if [ -z "$YC_INSTANCE_ID" ] || [ "$YC_INSTANCE_ID" == "null" ]; then
+        rm -f cloud-init.yaml $YC_SA_KEY_FILE $TMP_OUTPUT
+        exit 1
+    else
+        log "✅ VM найдена по имени с ID: $YC_INSTANCE_ID"
+    fi
+else
+    log "✅ VM создана с ID: $YC_INSTANCE_ID"
+fi
+
+# Очищаем временный файл
+rm -f $TMP_OUTPUT
 
 # Получение публичного IP
 log "Получение IP адреса..."
 for i in {1..30}; do
-    PUBLIC_IP=$(yc compute instance get --id "$YC_INSTANCE_ID" --format json 2>/dev/null | jq -r '.network_interfaces[0].primary_v4_address.one_to_one_nat.address')
+    # Сохраняем вывод get instance в файл
+    GET_OUTPUT="/tmp/vm_get_output.json"
+    yc compute instance get --id "$YC_INSTANCE_ID" --format json > $GET_OUTPUT 2>&1
+    
+    PUBLIC_IP=$(jq -r '.network_interfaces[0].primary_v4_address.one_to_one_nat.address' $GET_OUTPUT 2>/dev/null || echo "")
+    rm -f $GET_OUTPUT
+    
     if [ ! -z "$PUBLIC_IP" ] && [ "$PUBLIC_IP" != "null" ]; then
         log "✅ Public IP: $PUBLIC_IP"
         break
@@ -160,33 +160,25 @@ for i in {1..30}; do
         exit 1
     fi
 done
- 
+
+# Очистка временных файлов
+rm -f cloud-init.yaml $YC_SA_KEY_FILE
+
+# Дальше установка Docker, копирование и т.д...
+log "✅ VM готова, продолжаем настройку..."
 
 # Установка Docker
 log "Установка Docker..."
 ssh "$SSH_USER@$PUBLIC_IP" <<'EOF'
-    # Удаление старых версий
-    sudo apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
-    
-    # Установка зависимостей
     sudo apt update
-    sudo apt install -y ca-certificates curl software-properties-common
-    
-    # Добавление Docker репозитория
+    sudo apt install -y ca-certificates curl
     sudo install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     sudo chmod a+r /etc/apt/keyrings/docker.gpg
-    
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-    
-    # Установка Docker
     sudo apt update
     sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin postgresql-client
-    
-    # Добавление пользователя в группу docker
     sudo usermod -aG docker $USER
-    
-    # Включение Docker
     sudo systemctl enable docker
     sudo systemctl start docker
 EOF
@@ -202,8 +194,6 @@ scp -r \
 log "Запуск PostgreSQL..."
 ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     cd /home/ubuntu/app
-    
-    # Запуск PostgreSQL контейнера
     sudo docker run -d \
         --name postgres-db \
         -e POSTGRES_DB=project-sem-1 \
@@ -213,9 +203,6 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
         -v postgres_data:/var/lib/postgresql/data \
         --restart unless-stopped \
         postgres:15
-    
-    # Ожидание PostgreSQL
-    echo "Ожидание PostgreSQL..."
     sleep 15
 EOF
 
@@ -223,14 +210,9 @@ EOF
 log "Сборка и запуск приложения..."
 ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
     cd /home/ubuntu/app
-    
-    # Сборка Docker образа
     sudo docker build -t devops-app:latest .
-    
-    # Запуск приложения
     sudo docker stop devops-app 2>/dev/null || true
     sudo docker rm devops-app 2>/dev/null || true
-    
     sudo docker run -d \
         --name devops-app \
         -p 8080:8080 \
@@ -241,8 +223,6 @@ ssh "$SSH_USER@$PUBLIC_IP" << 'EOF'
         -e POSTGRES_PASSWORD=val1dat0r \
         --restart unless-stopped \
         devops-app:latest
-    
-    # Проверка
     sleep 10
     sudo docker ps | grep devops-app
 EOF
@@ -268,6 +248,3 @@ log "Приложение: http://$PUBLIC_IP:8080"
 log "PostgreSQL: $PUBLIC_IP:5432"
 log "SSH: ssh ubuntu@$PUBLIC_IP"
 log "========================================="
-
-# Очистка
-rm -f cloud-init.yaml

@@ -66,14 +66,20 @@ ssh_pwauth: no
 disable_root: true
 EOF
 
-# Создание виртуальной машины и сохранение вывода в файл
-log "Запуск создания VM..."
+# Находим ID группы безопасности
+DEFAULT_SG_ID="enpt8kc9c5015ktou1kj"  # ID из вашего вывода
+log "Используем группу безопасности: $DEFAULT_SG_ID"
+
+# Создание виртуальной машины
+log "Создание виртуальной машины $INSTANCE_NAME..."
+
+# Создаем VM с группой безопасности
 TMP_OUTPUT="/tmp/vm_create_output.json"
 yc compute instance create \
     --name "$INSTANCE_NAME" \
     --folder-id "$YC_FOLDER_ID" \
     --zone "$YC_ZONE" \
-    --network-interface subnet-name=default-$YC_ZONE,nat-ip-version=ipv4 \
+    --network-interface subnet-name=default-$YC_ZONE,security-group-id=$DEFAULT_SG_ID,nat-ip-version=ipv4 \
     --create-boot-disk size=30,image-id="$YC_IMAGE_ID" \
     --memory=4 \
     --cores=2 \

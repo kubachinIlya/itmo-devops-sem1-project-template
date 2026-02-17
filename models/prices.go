@@ -13,11 +13,11 @@ type PriceItem struct {
 }
 
 type PriceResponse struct {
-	TotalCount      int     `json:"total_count"`
-	DuplicatesCount int     `json:"duplicates_count"`
-	TotalItems      int     `json:"total_items"`
-	TotalCategories int     `json:"total_categories"`
-	TotalPrice      float64 `json:"total_price"`
+	TotalCount      int     `json:"total_count"`      // Общее количество строк в исходном файле
+	DuplicatesCount int     `json:"duplicates_count"` // Количество дубликатов во входных данных и в СУБД
+	TotalItems      int     `json:"total_items"`      // Количество успешно добавленных элементов
+	TotalCategories int     `json:"total_categories"` // Общее количество категорий по всей БД
+	TotalPrice      float64 `json:"total_price"`      // Суммарная стоимость по всей БД
 }
 
 type PriceDB struct {

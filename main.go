@@ -22,6 +22,7 @@ func main() {
 	// Создание таблицы
 	err = db.CreateTable(database)
 	if err != nil {
+		database.Close()
 		log.Fatal(err)
 	}
 
